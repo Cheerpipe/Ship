@@ -2,13 +2,13 @@
 
 # ==============================================================================
 # 🚢 ship - Docker Compose Stack Updater
-# Version: 3.9.1
+# Version: 3.9.2
 # Developed by: Felipe Urzúa & Gemini AI
 # License: Creative Commons Attribution-NonCommercial 4.0 International
 # ==============================================================================
 
 # --- Configuration & Colors ---
-VERSION="v3.9.1"
+VERSION="v3.9.2"
 REPO_URL="https://raw.githubusercontent.com/Cheerpipe/Ship/main/ship.sh"
 ERROR_LOG="$HOME/.ship_errors.log"
 PID_FILE="/tmp/.ship.pid"
@@ -50,7 +50,7 @@ show_help() {
     echo ""
     echo -e "${YELLOW}OPTIONS:${NC}"
     echo "  -a, --all       Scan all subdirectories for docker-compose files"
-    echo "  -y, --yes       Auto-confirm all updates (Non-interactive)"
+    echo "  -y, --yes       Auto-confirm all updates/installation"
     echo "  -p, --prune     Remove unused images after update"
     echo "  -v, --verbose   Show detailed technical output"
     echo "  -h, --help      Show this help menu"
@@ -58,10 +58,11 @@ show_help() {
     echo ""
 }
 
-# --- Installation Logic (Refined) ---
+# --- Installation Logic (Refined v3.9.2) ---
 
 install_ship() {
     local bin_dest="/usr/local/bin/ship"
+    local auto_confirm=$1
 
     if [[ $EUID -ne 0 ]]; then
         echo -e "${RED}ERROR:${NC} Administrative privileges required!"
@@ -69,14 +70,20 @@ install_ship() {
         exit 1
     fi
 
+    echo -e "${BLUE}Preparing installation of ship $VERSION...${NC}"
+
     if [[ -f "$bin_dest" ]]; then
         local current_v=$($bin_dest --version 2>/dev/null || echo "unknown")
-        echo -e "${YELLOW}Existing installation detected:${NC}"
-        echo "  Current version: $current_v"
-        echo "  New version:     $VERSION"
-        echo ""
-        read -p "Overwrite existing binary? [y/N] " confirm
-        [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Installation cancelled."; exit 0; }
+        echo -e "${YELLOW}Existing installation detected (Version: $current_v).${NC}"
+        if [[ "$auto_confirm" != true ]]; then
+            read -p "Overwrite and update to $VERSION? [y/N] " confirm
+            [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Installation cancelled."; exit 0; }
+        fi
+    else
+        if [[ "$auto_confirm" != true ]]; then
+            read -p "Do you want to install ship $VERSION in $bin_dest? [y/N] " confirm
+            [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Installation cancelled."; exit 0; }
+        fi
     fi
 
     # Logic to handle installation from file or from curl pipe
@@ -102,7 +109,6 @@ process_stack() {
     local auto_yes=$2
     local verbose=$3
 
-    # Use subshell to avoid directory bleed
     (
         cd "$dir" || return
         local compose_file=""
@@ -127,7 +133,10 @@ process_stack() {
 
         if [[ "$old_hashes" != "$new_hashes" ]]; then
             echo -e "${CYAN}Update available!${NC} Changes detected."
-            [[ "$auto_yes" != true ]] && read -p "Apply update to $dir? [y/N] " confirm
+            local confirm
+            if [[ "$auto_yes" != true ]]; then
+                read -p "Apply update to $dir? [y/N] " confirm
+            fi
             if [[ "$auto_yes" == true || "$confirm" == "y" || "$confirm" == "Y" ]]; then
                 docker compose up -d --remove-orphans
                 echo -e "${GREEN}Stack updated.${NC}"
@@ -143,19 +152,25 @@ process_stack() {
 
 # --- Main Execution ---
 
+# Detect flags before anything else
+AUTO_YES=false
+for arg in "$@"; do
+    [[ "$arg" == "-y" || "$arg" == "--yes" ]] && AUTO_YES=true
+done
+
 if [[ "$1" == "--version" ]]; then
     echo "$VERSION"
     exit 0
 fi
 
-if [[ "$1" == "--install" ]]; then
-    install_ship
+if [[ "$1" == "--install" || "$2" == "--install" ]]; then
+    install_ship "$AUTO_YES"
     exit 0
 fi
 
 check_seaworthiness
 
-# PID lock to prevent race conditions
+# PID lock
 if [[ -f "$PID_FILE" ]]; then
     pid=$(cat "$PID_FILE")
     if ps -p "$pid" > /dev/null; then
@@ -167,7 +182,6 @@ echo $$ > "$PID_FILE"
 trap 'rm -f "$PID_FILE" &>/dev/null' EXIT
 
 ALL_FLAG=false
-AUTO_YES=false
 PRUNE_FLAG=false
 VERBOSE=false
 TARGET_DIRS=()
@@ -187,7 +201,6 @@ done
 if [[ "$ALL_FLAG" == true ]]; then
     IGNORE_LIST=(".git" "node_modules")
     if [[ -f ".dcuignore" ]]; then
-        # Robust loading of ignore list
         while IFS= read -r line || [[ -n "$line" ]]; do
             [[ -z "$line" || "$line" =~ ^# ]] && continue
             IGNORE_LIST+=("${line// /}")

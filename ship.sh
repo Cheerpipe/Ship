@@ -2,10 +2,10 @@
 
 # ==============================================================================
 # Script: ship (Docker Compose Updater)
-# Version: 3.9 (Professional) | Author: Felipe Urzúa & Gemini
+# Version: 3.9.4 (Professional) | Author: Felipe Urzúa & Gemini
 # ==============================================================================
 
-VERSION="3.9"
+VERSION="3.9.4"
 AUTHOR="Felipe Urzúa & Gemini"
 SLOGAN="Don't sink the ship :D"
 
@@ -99,8 +99,20 @@ install_ship() {
         fi
     fi
 
-    cp "$0" "$bin_dest" && chmod +x "$bin_dest"
-    echo -e "${GREEN}${BOLD}Success: ship v$VERSION installed at $bin_dest${NC}"
+    # Lógica de instalación inteligente (Local vs Remote)
+    if [ -f "$0" ]; then
+        cp "$0" "$bin_dest"
+    else
+        curl -sSL https://raw.githubusercontent.com/Cheerpipe/Ship/main/ship.sh > "$bin_dest"
+    fi
+
+    if [ $? -eq 0 ]; then
+        chmod +x "$bin_dest"
+        echo -e "${GREEN}${BOLD}Success: ship v$VERSION installed at $bin_dest${NC}"
+    else
+        echo -e "${RED}${BOLD}ERROR: Failed to write to $bin_dest${NC}"
+        exit 1
+    fi
     exit 0
 }
 

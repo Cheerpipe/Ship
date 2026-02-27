@@ -1,236 +1,258 @@
 #!/bin/bash
 
 # ==============================================================================
-# 🚢 ship - Docker Compose Stack Updater
-# Version: 3.9.2
-# Developed by: Felipe Urzúa & Gemini AI
-# License: Creative Commons Attribution-NonCommercial 4.0 International
+# Script: ship (Docker Compose Updater)
+# Version: 3.9 (Professional) | Author: Felipe Urzúa & Gemini
 # ==============================================================================
 
-# --- Configuration & Colors ---
-VERSION="v3.9.2"
-REPO_URL="https://raw.githubusercontent.com/Cheerpipe/Ship/main/ship.sh"
-ERROR_LOG="$HOME/.ship_errors.log"
-PID_FILE="/tmp/.ship.pid"
+VERSION="3.9"
+AUTHOR="Felipe Urzúa & Gemini"
+SLOGAN="Don't sink the ship :D"
 
-# Colors
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-GREEN='\033[0;32m'
+# --- Colors ---
 RED='\033[0;31m'
+GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+CYAN='\033[0;36m'
+GRAY='\033[1;30m'
+NC='\033[0m'
+BOLD='\033[1m'
 
-# --- Core Functions ---
+LOCK_FILE="/tmp/ship.pid"
+LOG_FILE="$HOME/.ship_errors.log"
 
-log_error() {
-    echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >> "$ERROR_LOG"
+# --- Core Utility Functions ---
+
+get_timestamp() { echo -e "${GRAY}$(date +"[%Y-%m-%d %H:%M:%S]")${NC}"; }
+
+display_header() {
+    echo -e "${CYAN}${BOLD}ship v$VERSION${NC} | ${GRAY}Author: $AUTHOR${NC}"
+    echo -e "${YELLOW}${BOLD}$SLOGAN${NC}"
 }
 
 check_seaworthiness() {
-    if ! command -v docker &> /dev/null; then
-        echo -e "${RED}ERROR:${NC} Docker is not installed."
-        exit 1
+    local missing=()
+    local fail=false
+    command -v docker >/dev/null 2>&1 || { missing+=("docker (Engine)"); fail=true; }
+    command -v fmt >/dev/null 2>&1 || { missing+=("fmt (coreutils)"); fail=true; }
+    if ! docker compose version >/dev/null 2>&1; then
+        missing+=("docker-compose-plugin (V2)"); fail=true
     fi
-    if ! docker compose version &> /dev/null; then
-        echo -e "${RED}ERROR:${NC} Docker Compose V2 is required."
-        exit 1
+    if [ "$fail" = true ]; then
+        echo -e "${RED}${BOLD}ERROR: System requirements not met!${NC}"
+        echo -e "Missing dependencies:"
+        for item in "${missing[@]}"; do echo -e "  ${RED}[X]${NC} $item"; done
+        exit 99
     fi
-    if ! docker ps &> /dev/null; then
-        echo -e "${RED}ERROR:${NC} Cannot connect to Docker socket."
-        exit 1
+    if ! docker ps >/dev/null 2>&1; then
+        echo -e "${RED}${BOLD}ERROR: Docker socket access denied!${NC}"
+        echo -e "Check permissions. Recommendation: ${CYAN}sudo usermod -aG docker \$USER${NC}"
+        exit 99
     fi
 }
 
-show_help() {
-    echo -e "${BLUE}ship${NC} - The streamlined Docker Compose updater ${CYAN}$VERSION${NC}"
-    echo ""
-    echo -e "${YELLOW}USAGE:${NC}"
-    echo "  ship [options] [target_directories]"
-    echo ""
-    echo -e "${YELLOW}OPTIONS:${NC}"
-    echo "  -a, --all       Scan all subdirectories for docker-compose files"
-    echo "  -y, --yes       Auto-confirm all updates/installation"
-    echo "  -p, --prune     Remove unused images after update"
-    echo "  -v, --verbose   Show detailed technical output"
-    echo "  -h, --help      Show this help menu"
-    echo "      --install   Install ship globally to /usr/local/bin"
-    echo ""
-}
+display_help() {
+    display_header
+    echo -e "\n${BOLD}DESCRIPTION:${NC}"
+    echo -e "  ship automates the 'pull-and-recreate' cycle of your Docker stacks."
+    echo -e "  Built for those who live for the thrill of a blind update."
 
-# --- Installation Logic (Refined v3.9.2) ---
+    echo -e "\n${BOLD}USAGE:${NC} ship [options] [stack_dir1 stack_dir2 ...]"
+    echo -e "\n${BOLD}OPTIONS:${NC}"
+    echo -e "  ${YELLOW}-a, --all${NC}             Scan all subdirectories for compose files."
+    echo -e "  ${YELLOW}-y, --yes${NC}             Skip confirmation and proceed with updates."
+    echo -e "  ${YELLOW}-p, --prune${NC}           Remove unused images after execution."
+    echo -e "  ${YELLOW}-v, --verbose${NC}         Display detailed execution logs."
+    echo -e "  ${YELLOW}--install${NC}             Install 'ship' to /usr/local/bin."
+    echo -e "  ${YELLOW}--uninstall${NC}           Remove 'ship' from the system."
+    exit 0
+}
 
 install_ship() {
     local bin_dest="/usr/local/bin/ship"
-    local auto_confirm=$1
-
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}ERROR:${NC} Administrative privileges required!"
-        echo "Try: curl -sSL $REPO_URL | sudo bash -s -- --install"
-        exit 1
+    if [ "$EUID" -ne 0 ]; then 
+        echo -e "${RED}${BOLD}ERROR: Administrative privileges required!${NC}"
+        echo -e "Command: ${CYAN}sudo ./ship.sh --install${NC}"
+        exit 1 
     fi
 
-    echo -e "${BLUE}Preparing installation of ship $VERSION...${NC}"
-
-    if [[ -f "$bin_dest" ]]; then
-        local current_v=$($bin_dest --version 2>/dev/null || echo "unknown")
-        echo -e "${YELLOW}Existing installation detected (Version: $current_v).${NC}"
-        if [[ "$auto_confirm" != true ]]; then
-            read -p "Overwrite and update to $VERSION? [y/N] " confirm
-            [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Installation cancelled."; exit 0; }
+    if [ -f "$bin_dest" ]; then
+        local current_ver=$(grep -oP '^VERSION="\K[^"]+' "$bin_dest" 2>/dev/null || echo "Unknown")
+        echo -e "${YELLOW}${BOLD}Existing installation detected:${NC}"
+        echo -e "  Current version: v$current_ver"
+        echo -e "  New version:     v$VERSION"
+        echo -ne "\nOverwrite existing binary? [y/N] "
+        read confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            echo -e "${GRAY}Installation cancelled by user.${NC}"
+            exit 0
         fi
     else
-        if [[ "$auto_confirm" != true ]]; then
-            read -p "Do you want to install ship $VERSION in $bin_dest? [y/N] " confirm
-            [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Installation cancelled."; exit 0; }
+        echo -e "${CYAN}${BOLD}No existing installation found.${NC}"
+        echo -e "  Target:  $bin_dest"
+        echo -e "  Version: v$VERSION"
+        echo -ne "\nDo you want to install ship? [y/N] "
+        read confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            echo -e "${GRAY}Installation cancelled by user.${NC}"
+            exit 0
         fi
     fi
 
-    # Logic to handle installation from file or from curl pipe
-    if [[ -f "$0" && "$0" != "/bin/bash" && "$0" != "bash" ]]; then
-        cp "$0" "$bin_dest"
-    else
-        echo -e "${CYAN}Downloading source from repository...${NC}"
-        if ! curl -sSL "$REPO_URL" -o "$bin_dest"; then
-            echo -e "${RED}ERROR:${NC} Failed to download from $REPO_URL"
-            exit 1
-        fi
-    fi
-
-    chmod +x "$bin_dest"
-    echo -e "${GREEN}Success:${NC} ship $VERSION installed at $bin_dest"
+    cp "$0" "$bin_dest" && chmod +x "$bin_dest"
+    echo -e "${GREEN}${BOLD}Success: ship v$VERSION installed at $bin_dest${NC}"
     exit 0
 }
 
-# --- Update Engine ---
+uninstall_ship() {
+    local bin_dest="/usr/local/bin/ship"
+    if [ "$EUID" -ne 0 ]; then 
+        echo -e "${RED}${BOLD}ERROR: Administrative privileges required!${NC}"
+        echo -e "Command: ${CYAN}sudo ship --uninstall${NC}"
+        exit 1 
+    fi
 
-process_stack() {
-    local dir=$1
-    local auto_yes=$2
-    local verbose=$3
+    if [ ! -f "$bin_dest" ]; then
+        echo -e "${YELLOW}Ship is not installed in $bin_dest. Nothing to do.${NC}"
+        exit 0
+    fi
 
-    (
-        cd "$dir" || return
-        local compose_file=""
-        [[ -f "docker-compose.yml" ]] && compose_file="docker-compose.yml"
-        [[ -f "docker-compose.yaml" ]] && compose_file="docker-compose.yaml"
+    echo -e "${RED}${BOLD}Uninstalling ship:${NC}"
+    echo -e "  Location: $bin_dest"
+    echo -ne "\nAre you sure you want to remove ship from your system? [y/N] "
+    read confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo -e "${GRAY}Uninstallation cancelled by user.${NC}"
+        exit 0
+    fi
 
-        if [[ -z "$compose_file" ]]; then
-            [[ "$verbose" == true ]] && echo -e "${YELLOW}Skipping $dir:${NC} No compose file found."
-            return
-        fi
+    rm -f "$bin_dest"
+    echo -e "${GREEN}${BOLD}Success: ship has been removed.${NC}"
+    exit 0
+}
 
-        echo -e "${BLUE}Checking stack:${NC} $dir"
-        local old_hashes=$(docker compose images -q)
-        
-        if [[ "$verbose" == true ]]; then
-            docker compose pull
+process_update() {
+    local dir="$1"; local idx="$2"; local total="$3"
+    local name=$(basename "$(cd "$dir" && pwd)")
+    local yaml=""; [[ -f "$dir/docker-compose.yml" ]] && yaml="$dir/docker-compose.yml" || yaml="$dir/docker-compose.yaml"
+
+    echo -e "$(get_timestamp) ${GRAY}[$idx/$total]${NC} ${CYAN}${BOLD}➜ PROCESSING STACK:${NC} ${BOLD}$name${NC}"
+    
+    local status=$(docker compose -f "$yaml" ps --format "{{.Status}}" 2>/dev/null)
+    local active=false; [[ "$status" == *"running"* ]] && active=true
+
+    echo -ne "$(get_timestamp)   ${NC}├─ [INFO] Pulling remote images..."
+    docker compose -f "$yaml" pull >/dev/null 2>&1
+    echo -e " Done."
+
+    local ids=$(docker compose -f "$yaml" ps -q 2>/dev/null)
+    local h_run=$( [ -z "$ids" ] && echo "OFF" || docker inspect --format '{{.Image}}' $ids 2>/dev/null | sort | xargs | tr -d ' ' )
+    local imgs=$(docker compose -f "$yaml" config --images 2>/dev/null)
+    local h_reg=""; for i in $imgs; do h=$(docker image inspect --format '{{.Id}}' "$i" 2>/dev/null); h_reg+="$h "; done
+    h_reg=$(echo "$h_reg" | tr ' ' '\n' | sort | xargs | tr -d ' ')
+
+    if [[ "$h_run" != "$h_reg" ]]; then
+        if [ "$active" = false ]; then
+            echo -e "$(get_timestamp)   ${YELLOW}└─ [SKIP] New images available, but stack is currently stopped.${NC}"
+            SUMMARY_SKIPPED+=("$name")
         else
-            docker compose pull &> /dev/null
-        fi
-
-        local new_hashes=$(docker compose images -q)
-
-        if [[ "$old_hashes" != "$new_hashes" ]]; then
-            echo -e "${CYAN}Update available!${NC} Changes detected."
-            local confirm
-            if [[ "$auto_yes" != true ]]; then
-                read -p "Apply update to $dir? [y/N] " confirm
-            fi
-            if [[ "$auto_yes" == true || "$confirm" == "y" || "$confirm" == "Y" ]]; then
-                docker compose up -d --remove-orphans
-                echo -e "${GREEN}Stack updated.${NC}"
+            echo -e "$(get_timestamp)   ${GREEN}├─ [NEW] Recreating containers with updated images...${NC}"
+            if docker compose -f "$yaml" up -d >/dev/null 2>&1; then
+                echo -e "$(get_timestamp)   ${GREEN}└─ [SUCCESS] Stack updated and running.${NC}"
+                SUMMARY_SUCCESS+=("$name")
             else
-                echo "Update skipped."
+                echo -e "$(get_timestamp)   ${RED}└─ [FAILED] Execution error. Check logs at $LOG_FILE${NC}"
+                SUMMARY_ERROR+=("$name")
             fi
-        else
-            echo "No changes detected."
         fi
-        echo "---"
-    )
+    else
+        echo -e "$(get_timestamp)   ${YELLOW}└─ [OK] Stack is up to date.${NC}"
+        SUMMARY_SKIPPED+=("$name")
+    fi
+    echo -e "   ${GRAY}──────────────────────────────────────────────────────${NC}"
 }
 
-# --- Main Execution ---
+# --- Runtime Logic ---
 
-# Detect flags before anything else
-AUTO_YES=false
-for arg in "$@"; do
-    [[ "$arg" == "-y" || "$arg" == "--yes" ]] && AUTO_YES=true
+ALL_MODES=false; PRUNE=false; FORCE_YES=false; TARGET_DIRS=(); VALID_TARGETS=(); NOT_FOUND=(); NO_COMPOSE=();
+declare -a SUMMARY_SUCCESS; declare -a SUMMARY_SKIPPED; declare -a SUMMARY_ERROR;
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --install)    install_ship ;;
+        --uninstall)  uninstall_ship ;;
+        -y|--yes)     FORCE_YES=true; shift ;;
+        -a|--all)     ALL_MODES=true; shift ;;
+        -p|--prune)   PRUNE=true; shift ;;
+        -h|--help)    display_help ;;
+        *)            TARGET_DIRS+=("$1"); shift ;;
+    esac
 done
-
-if [[ "$1" == "--version" ]]; then
-    echo "$VERSION"
-    exit 0
-fi
-
-if [[ "$1" == "--install" || "$2" == "--install" ]]; then
-    install_ship "$AUTO_YES"
-    exit 0
-fi
 
 check_seaworthiness
 
-# PID lock
-if [[ -f "$PID_FILE" ]]; then
-    pid=$(cat "$PID_FILE")
-    if ps -p "$pid" > /dev/null; then
-        echo -e "${RED}ERROR:${NC} ship is already running."
-        exit 1
-    fi
-fi
-echo $$ > "$PID_FILE"
-trap 'rm -f "$PID_FILE" &>/dev/null' EXIT
+[[ "$ALL_MODES" = false && ${#TARGET_DIRS[@]} -eq 0 ]] && display_help
 
-ALL_FLAG=false
-PRUNE_FLAG=false
-VERBOSE=false
-TARGET_DIRS=()
-
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        -a|--all) ALL_FLAG=true ;;
-        -y|--yes) AUTO_YES=true ;;
-        -p|--prune) PRUNE_FLAG=true ;;
-        -v|--verbose) VERBOSE=true ;;
-        -h|--help) show_help; exit 0 ;;
-        *) TARGET_DIRS+=("$1") ;;
-    esac
-    shift
-done
-
-if [[ "$ALL_FLAG" == true ]]; then
-    IGNORE_LIST=(".git" "node_modules")
-    if [[ -f ".dcuignore" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            [[ -z "$line" || "$line" =~ ^# ]] && continue
-            IGNORE_LIST+=("${line// /}")
-        done < ".dcuignore"
-    fi
-
+if [ "$ALL_MODES" = true ]; then
     for d in */; do
-        dir_name=${d%/}
-        skip=false
-        for ignore in "${IGNORE_LIST[@]}"; do
-            [[ "$dir_name" == "$ignore" ]] && skip=true && break
-        done
-        [[ "$skip" == true ]] && continue
-        process_stack "$dir_name" "$AUTO_YES" "$VERBOSE"
-    done
-elif [[ ${#TARGET_DIRS[@]} -gt 0 ]]; then
-    for dir in "${TARGET_DIRS[@]}"; do
-        if [[ -d "$dir" ]]; then
-            process_stack "$dir" "$AUTO_YES" "$VERBOSE"
-        else
-            echo -e "${RED}Error:${NC} Directory '$dir' not found."
-        fi
+        d=${d%/}
+        [[ -f ".dcuignore" ]] && grep -Fxq "$d" ".dcuignore" && continue
+        [[ -f "$d/docker-compose.yml" || -f "$d/docker-compose.yaml" ]] && VALID_TARGETS+=("$d")
     done
 else
-    show_help
+    for t in "${TARGET_DIRS[@]}"; do
+        if [ ! -d "$t" ]; then NOT_FOUND+=("$t")
+        elif [[ ! -f "$t/docker-compose.yml" && ! -f "$t/docker-compose.yaml" ]]; then NO_COMPOSE+=("$t")
+        else VALID_TARGETS+=("$t"); fi
+    done
 fi
 
-if [[ "$PRUNE_FLAG" == true ]]; then
-    echo -e "${YELLOW}Pruning unused images...${NC}"
-    docker image prune -f
+display_header
+echo -e "${BOLD}Scanning directories...${NC}"
+
+if [ ${#NOT_FOUND[@]} -gt 0 ]; then
+    echo -e "\n${RED}${BOLD}Directories not found:${NC}"
+    echo "${NOT_FOUND[@]}" | fmt -w 80 | sed 's/^/  /'
 fi
 
-echo -e "${GREEN}Finished.${NC}"
+if [ ${#NO_COMPOSE[@]} -gt 0 ]; then
+    echo -e "\n${YELLOW}${BOLD}Directories without compose files:${NC}"
+    echo "${NO_COMPOSE[@]}" | fmt -w 80 | sed 's/^/  /'
+fi
+
+if [ ${#VALID_TARGETS[@]} -gt 0 ]; then
+    echo -e "\n${BOLD}Stacks identified for update:${NC}"
+    printf "${CYAN}%s${NC} " "${VALID_TARGETS[@]}" | fmt -w 80 | sed 's/^/  /'
+    
+    echo -e "\n\n${BOLD}Summary:${NC} Total of ${#VALID_TARGETS[@]} stack(s) to process."
+    
+    if [ "$FORCE_YES" = false ]; then
+        echo -ne "\n${BOLD}Proceed with update process? [Y/n] ${NC}"
+        read confirm
+        [[ ! "$confirm" =~ ^[Yy]?$ ]] && { echo "Process aborted by user."; exit 0; }
+    fi
+else
+    echo -e "\n${RED}ERROR: No valid stacks found to process.${NC}"; exit 100
+fi
+
+if [ -f "$LOCK_FILE" ]; then
+    if kill -0 $(cat "$LOCK_FILE") 2>/dev/null; then
+        echo -e "${RED}ERROR: Process lock detected. ship is already running.${NC}"; exit 1
+    fi
+fi
+echo $$ > "$LOCK_FILE"
+trap 'rm -f "$LOCK_FILE"; exit' INT TERM EXIT
+
+echo -e "\n${CYAN}${BOLD}Executing ship v$VERSION...${NC}"
+I=1
+for dir in "${VALID_TARGETS[@]}"; do
+    process_update "$dir" "$I" "${#VALID_TARGETS[@]}"
+    ((I++))
+done
+
+if [ "$PRUNE" = true ]; then
+    echo -e "\n$(get_timestamp) ${YELLOW}Cleaning up unused Docker images (prune)...${NC}"
+    docker image prune -f >/dev/null
+fi
+
+echo -e "\n${CYAN}${BOLD}Execution Finished | Updated: ${#SUMMARY_SUCCESS[@]} | Up to date: ${#SUMMARY_SKIPPED[@]} | Failed: ${#SUMMARY_ERROR[@]}${NC}"

@@ -19,7 +19,6 @@ You can install **ship** instantly without manual downloads by running this comm
 ```bash
 sudo bash -c "$(curl -sSL https://raw.githubusercontent.com/Cheerpipe/Ship/main/ship.sh)" -- --install
 ```
-*Remember to replace `TU_USUARIO/TU_REPO` with your actual GitHub repository path.*
 
 ---
 

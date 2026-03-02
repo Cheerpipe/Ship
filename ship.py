@@ -13,10 +13,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
 # Script: ship (Docker Compose Updater)
-# Version: 5.7.2 (UI Refined) | Author: Felipe Urzúa & Gemini
+# Version: 5.7.3 (Final) | Author: Felipe Urzúa & Gemini
 # ==============================================================================
 
-VERSION = "5.7.2"
+VERSION = "5.7.3"
 AUTHOR = "Felipe Urzúa & Gemini"
 SLOGAN = "Don't sink the ship :D"
 LOCK_FILE = "/tmp/ship.pid"
@@ -173,7 +173,6 @@ def install_ship():
 def spawn_tasks(executor, targets, futures_map, verbose, delay, force):
     """Background thread that spawns scan tasks with a staggered launch (delay)."""
     for target in targets:
-        # Use Lock to safely add to the shared dictionary
         with map_lock:
             future = executor.submit(check_stack, target, verbose, delay, force)
             futures_map[future] = target
@@ -182,16 +181,25 @@ def spawn_tasks(executor, targets, futures_map, verbose, delay, force):
 def main():
     """Main entry point: Handles arguments, scanning orchestration, and deployment."""
     import argparse
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--install", action="store_true")
-    parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument("-a", "--all", action="store_true")
-    parser.add_argument("-y", "--yes", action="store_true")
-    parser.add_argument("-p", "--prune", action="store_true")
-    parser.add_argument("-f", "--force", action="store_true") # Bypasses image comparison
-    parser.add_argument("-j", "--jobs", type=int, default=100) 
-    parser.add_argument("-d", "--delay", type=int, default=SCAN_DELAY_MS)
-    parser.add_argument("targets", nargs="*")
+    parser = argparse.ArgumentParser(
+        description=f"ship v{VERSION} - Docker Compose Updater",
+        formatter_class=argparse.RawTextHelpFormatter,
+        add_help=False
+    )
+    
+    # Standard Options
+    group = parser.add_argument_group(f"{CYAN}{BOLD}Available Parameters{NC}")
+    group.add_argument("-a", "--all", action="store_true", help="Scan all subdirectories for valid compose files.")
+    group.add_argument("-f", "--force", action="store_true", help="Bypass hash comparison and force update on targets.")
+    group.add_argument("-y", "--yes", action="store_true", help="Bypass user confirmation before processing.")
+    group.add_argument("-p", "--prune", action="store_true", help="Execute 'docker image prune -f' after updates.")
+    group.add_argument("-v", "--verbose", action="store_true", help="Enable detailed technical report of hashes and IDs.")
+    group.add_argument("-j", "--jobs", type=int, default=100, help="Max concurrent worker threads (Default: 100).")
+    group.add_argument("-d", "--delay", type=int, default=SCAN_DELAY_MS, help="Interval between thread launches in ms (Default: 200).")
+    group.add_argument("-h", "--help", action="help", help="Show this help message and exit.")
+    group.add_argument("--install", action="store_true", help="Deploy the script to /usr/local/bin/ship.")
+    parser.add_argument("targets", nargs="*", help="Specific directories to scan.")
+
     args = parser.parse_args()
 
     if args.install: install_ship()
@@ -208,19 +216,20 @@ def main():
         for t in [t.rstrip('/') for t in args.targets]:
             if os.path.isdir(t): valid_targets.append(t)
 
-    if not valid_targets: sys.exit(1)
+    if not valid_targets:
+        print(f"{YELLOW}No targets found. Use -a to scan all or specify a directory.{NC}")
+        sys.exit(0)
 
     print(f"{BOLD}Scanning {len(valid_targets)} stacks...{NC}")
 
     futures_map = {}
     with ThreadPoolExecutor(max_workers=args.jobs) as executor:
-        # Decouple task spawning for a fluid UI
         spawner = threading.Thread(target=spawn_tasks, args=(executor, valid_targets, futures_map, args.verbose, args.delay, args.force))
+        spawner.daemon = True
         spawner.start()
 
         count = 0
         while count < len(valid_targets):
-            # Use Lock to extract completed futures safely
             with map_lock:
                 current_futures = list(futures_map.keys())
             
@@ -244,13 +253,11 @@ def main():
     if not updatable:
         print(f"\n{GREEN}{BOLD}Everything is at the latest version.{NC}"); sys.exit(0)
 
-    # UI Improvement: Conditional status message based on Force Mode
     status_label = "Ready to update (Force Mode):" if args.force else "Updates available for:"
     print(f"\n{CYAN}{BOLD}{status_label}{NC} {BOLD}{' '.join(updatable)}{NC}")
     
     if not args.yes and input(f"\nProceed with update? [Y/n] ").lower() not in ['', 'y']: sys.exit(0)
 
-    # Unique instance lock for the update process
     f_lock = open(LOCK_FILE, 'w')
     try:
         fcntl.lockf(f_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -263,7 +270,6 @@ def main():
                 subprocess.run(f"docker compose -f {yaml} pull", shell=True, stderr=log, stdout=log)
                 print(" Done.")
                 print(f"   {GREEN}├─ [NEW] Recreating (Force)...{NC}")
-                # Always uses --force-recreate to guarantee the usage of the new image
                 u = subprocess.run(f"docker compose -f {yaml} up -d --force-recreate", shell=True, stderr=log, stdout=log)
                 print(f"   {GREEN if u.returncode == 0 else RED}└─ [{'SUCCESS' if u.returncode == 0 else 'FAILED'}].{NC}")
             print(f"   {GRAY}{'─'*54}{NC}")

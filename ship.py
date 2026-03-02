@@ -13,10 +13,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
 # Script: ship (Docker Compose Updater)
-# Version: 5.7.5 (Universal Installer) | Author: Felipe Urzúa & Gemini
+# Version: 5.7.6 (Logic Sync) | Author: Felipe Urzúa & Gemini
 # ==============================================================================
 
-VERSION = "5.7.5"
+VERSION = "5.7.6"
 AUTHOR = "Felipe Urzúa & Gemini"
 SLOGAN = "Don't sink the ship :D"
 LOCK_FILE = "/tmp/ship.pid"
@@ -33,16 +33,13 @@ RED, GREEN, YELLOW, CYAN = "\033[0;31m", "\033[0;32m", "\033[1;33m", "\033[0;36m
 GRAY, BOLD, NC, CLEAR_LINE = "\033[1;30m", "\033[1m", "\033[0m", "\033[K"
 
 def get_timestamp():
-    """Generates a formatted timestamp for logging purposes."""
     return f"{GRAY}[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]{NC}"
 
 def display_header():
-    """Prints the script header to the terminal."""
     print(f"{CYAN}{BOLD}ship v{VERSION}{NC} | {GRAY}Author: {AUTHOR}{NC}")
     print(f"{YELLOW}{BOLD}{SLOGAN}{NC}")
 
 def run_cmd(cmd):
-    """Executes a system command and returns its output (stdout, stderr)."""
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
         return result.stdout.strip(), result.stderr.strip()
@@ -50,14 +47,12 @@ def run_cmd(cmd):
         return "", str(e)
 
 def get_arch():
-    """Detects system architecture to filter images on Docker Hub."""
     m = platform.machine().lower()
     if m in ["x86_64", "amd64"]: return "amd64"
     if m in ["aarch64", "arm64", "armv8"]: return "arm64"
     return m
 
 def get_remote_digest(image, arch, verbose, delay_ms):
-    """Retrieves the SHA256 Digest from remote registry with rate limiting."""
     global last_request_time
     with rate_lock:
         current_time = time.time() * 1000
@@ -79,7 +74,6 @@ def get_remote_digest(image, arch, verbose, delay_ms):
     return global_match.group(1) if global_match else None
 
 def check_stack(directory, verbose, delay_ms, force=False):
-    """Analyzes a directory to determine if updates are needed."""
     yaml_files = ["docker-compose.yml", "docker-compose.yaml"]
     yaml_path = next((os.path.join(directory, f) for f in yaml_files if os.path.exists(os.path.join(directory, f))), None)
     if not yaml_path: return "NO_COMPOSE", ""
@@ -149,10 +143,8 @@ def check_stack(directory, verbose, delay_ms, force=False):
     return ("UPDATE" if needs_update else "OK"), log_acc
 
 def install_ship():
-    """Installs the script. Uses a robust method to capture source code."""
     if os.geteuid() != 0:
         print(f"{RED}Error: Run with sudo.{NC}"); sys.exit(1)
-    
     dest = "/usr/local/bin/ship"
     if os.path.exists(dest):
         with open(dest, 'r') as f:
@@ -162,12 +154,7 @@ def install_ship():
         if input("Overwrite? [y/N] ").lower() != 'y': sys.exit(0)
 
     try:
-        # Step 1: Attempt to get the source code from the remote URL directly if via curl
-        # or from the current file if running locally.
         source_url = "https://raw.githubusercontent.com/Cheerpipe/Ship/refs/heads/main/ship.py"
-        
-        # If we are in 'curl' mode, we won't have __file__. Let's just download it once more
-        # to ensure we save the clean file to disk.
         if "__file__" not in globals() or "curl" in sys.argv:
             import urllib.request
             with urllib.request.urlopen(source_url) as response:
@@ -175,10 +162,8 @@ def install_ship():
         else:
             with open(__file__, 'r') as f:
                 source_code = f.read()
-
         with open(dest, 'w') as f:
             f.write(source_code)
-        
         os.chmod(dest, 0o755)
         print(f"{GREEN}Success: ship v{VERSION} installed globally.{NC}")
     except Exception as e:
@@ -186,7 +171,6 @@ def install_ship():
     sys.exit(0)
 
 def spawn_tasks(executor, targets, futures_map, verbose, delay, force):
-    """Background thread that spawns scan tasks with a staggered launch."""
     for target in targets:
         with map_lock:
             future = executor.submit(check_stack, target, verbose, delay, force)
@@ -194,24 +178,18 @@ def spawn_tasks(executor, targets, futures_map, verbose, delay, force):
         time.sleep(delay / 1000.0)
 
 def main():
-    """Main entry point: Handles arguments, scanning, and deployment."""
     import argparse
-    parser = argparse.ArgumentParser(
-        description=f"ship v{VERSION} - Docker Compose Updater",
-        formatter_class=argparse.RawTextHelpFormatter,
-        add_help=False
-    )
-    
+    parser = argparse.ArgumentParser(description=f"ship v{VERSION}", add_help=False)
     group = parser.add_argument_group(f"{CYAN}{BOLD}Available Parameters{NC}")
-    group.add_argument("-a", "--all", action="store_true", help="Scan all subdirectories.")
-    group.add_argument("-f", "--force", action="store_true", help="Bypass hash checks.")
-    group.add_argument("-y", "--yes", action="store_true", help="Bypass confirmation.")
-    group.add_argument("-p", "--prune", action="store_true", help="Prune images after update.")
-    group.add_argument("-v", "--verbose", action="store_true", help="Detailed reports.")
-    group.add_argument("-j", "--jobs", type=int, default=100, help="Max threads (Default: 100).")
-    group.add_argument("-d", "--delay", type=int, default=SCAN_DELAY_MS, help="Launch delay in ms (Default: 200).")
-    group.add_argument("-h", "--help", action="help", help="Show this help message.")
-    group.add_argument("--install", action="store_true", help="Deploy to /usr/local/bin/ship.")
+    group.add_argument("-a", "--all", action="store_true")
+    group.add_argument("-f", "--force", action="store_true")
+    group.add_argument("-y", "--yes", action="store_true")
+    group.add_argument("-p", "--prune", action="store_true")
+    group.add_argument("-v", "--verbose", action="store_true")
+    group.add_argument("-j", "--jobs", type=int, default=100)
+    group.add_argument("-d", "--delay", type=int, default=SCAN_DELAY_MS)
+    group.add_argument("-h", "--help", action="help")
+    group.add_argument("--install", action="store_true")
     parser.add_argument("targets", nargs="*")
 
     args = parser.parse_args()
@@ -230,25 +208,20 @@ def main():
             if os.path.isdir(t): valid_targets.append(t)
 
     if not valid_targets:
-        print(f"{YELLOW}No targets found. Use -a or specify a directory.{NC}"); sys.exit(0)
+        print(f"{YELLOW}No targets found.{NC}"); sys.exit(0)
 
     print(f"{BOLD}Scanning {len(valid_targets)} stacks...{NC}")
-
     futures_map = {}
     with ThreadPoolExecutor(max_workers=args.jobs) as executor:
         spawner = threading.Thread(target=spawn_tasks, args=(executor, valid_targets, futures_map, args.verbose, args.delay, args.force))
         spawner.daemon = True
         spawner.start()
-
         count = 0
         while count < len(valid_targets):
             with map_lock:
                 current_futures = list(futures_map.keys())
-            
             if not current_futures:
-                time.sleep(0.1)
-                continue
-
+                time.sleep(0.1); continue
             for future in as_completed(current_futures):
                 with map_lock:
                     if future in futures_map:
@@ -268,6 +241,7 @@ def main():
     print(f"\n{CYAN}{BOLD}{status_label}{NC} {BOLD}{' '.join(updatable)}{NC}")
     if not args.yes and input(f"\nProceed? [Y/n] ").lower() not in ['', 'y']: sys.exit(0)
 
+    # UPDATED LOGIC HERE
     f_lock = open(LOCK_FILE, 'w')
     try:
         fcntl.lockf(f_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -279,8 +253,13 @@ def main():
                 print(f"   {NC}├─ [INFO] Pulling...", end="", flush=True)
                 subprocess.run(f"docker compose -f {yaml} pull", shell=True, stderr=log, stdout=log)
                 print(" Done.")
-                print(f"   {GREEN}├─ [NEW] Recreating (Force)...{NC}")
-                u = subprocess.run(f"docker compose -f {yaml} up -d --force-recreate", shell=True, stderr=log, stdout=log)
+                
+                # Dynamic Flag selection
+                recreate_flag = "--force-recreate" if args.force else ""
+                mode_text = "Force" if args.force else "Standard"
+                
+                print(f"   {GREEN}├─ [NEW] Recreating ({mode_text})...{NC}")
+                u = subprocess.run(f"docker compose -f {yaml} up -d {recreate_flag}", shell=True, stderr=log, stdout=log)
                 print(f"   {GREEN if u.returncode == 0 else RED}└─ [{'SUCCESS' if u.returncode == 0 else 'FAILED'}].{NC}")
             print(f"   {GRAY}{'─'*54}{NC}")
         if args.prune: run_cmd("docker image prune -f")

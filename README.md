@@ -1,95 +1,94 @@
-# 🚢 ship (Docker Compose Updater)
+ # 🚢 ship (Docker Compose Updater)
 
-> **"A streamlined automation tool for Docker stack maintenance."**
+ > "A streamlined automation tool for Docker stack maintenance, now powered by Python."
 
-**ship** is a lightweight Bash utility designed to automate the 'pull-and-recreate' cycle of Docker Compose stacks by detecting image changes via hash comparison.
+ ship is a lightweight Python utility designed to automate the 'pull-and-recreate' cycle of Docker Compose stacks by detecting image changes via deep hash comparison.
 
-## 🌟 Introduction
+ ## 🌟 Introduction
 
-I developed **ship** to simplify the maintenance of containers in my local home automation environment. It is primarily intended for **homelabs** and users who want to efficiently update multiple containers across different directories without manual intervention.
+ I developed ship to simplify the maintenance of containers in my local home automation environment. The tool has evolved from a simple Bash script to a high-performance Python application capable of scanning dozens of stacks in seconds using asynchronous multithreading.
 
-**⚠️ Disclaimer:** This tool is built for convenience. While it facilitates rapid updates, users should remain cautious. Controlling container versions and reviewing changelogs is a fundamental practice for stable environments. Use **ship** responsibly.
+ ⚠️ Disclaimer: This tool is built for convenience. While it facilitates rapid updates, users should remain cautious. Controlling container versions and reviewing changelogs is a fundamental practice for stable environments. Use ship responsibly.
 
----
+ ---
 
-## ⚡ Quick Install (One-Liner)
+ ## ⚡ Quick Install (One-Liner)
 
-You can install **ship** instantly without manual downloads by running this command (requires `curl`):
+ You can install ship instantly without manual downloads by running this command (requires curl and python3):
 
-```bash
-sudo bash -c "$(curl -sSL https://raw.githubusercontent.com/Cheerpipe/Ship/main/ship.sh)" -- --install
-```
+ ```bash
+ sudo python3 -c "$(curl -sSL https://raw.githubusercontent.com/Cheerpipe/Ship/refs/heads/main/ship.py)" --install
+ ```
 
----
+ ---
 
-## 🤖 The Build Process: A Human-AI Collaboration
+ ## 🤖 The Build Process: A Human-AI Collaboration
 
-This script is the result of an **iterative evolutionary process** between myself and **Gemini (Google's AI)**. 
+ This script is the result of an iterative evolutionary process between myself and Gemini (Google's AI).
 
-### Development Journey:
-* **Iterative Engineering:** We started with a basic update logic and evolved into a robust solution featuring hash-based change detection, safety locks, and professional error handling.
-* **Code Inspection:** I utilized the AI to perform intensive code audits, identifying edge cases, permission bottlenecks, and dependency requirements.
-* **Human Oversight:** During development, I performed real-time testing to detect regressions (such as logic gaps or inconsistent language). The AI acted as a technical partner, refactoring and repairing the code based on my feedback until reaching the stable v3.8.
-* **AI Optimization:** The AI suggested implementing the `check_seaworthiness` function for pre-execution validation and the `.ship.pid` mechanism to prevent concurrent execution conflicts.
+ ### Development Journey:
+ * Version 5.0+ Shift: Migrated from Bash to Python to leverage true multithreading and better JSON parsing of Docker outputs.
+ * Background Spawner Architecture: Implemented a non-blocking "spawner" thread that launches scan tasks every 200ms, ensuring a smooth UI and preventing API rate-limiting.
+ * Deep Inspection: Evolved logic to compare not just Image Tags, but Remote Digests vs Local Digests and Local IDs vs Running Container IDs.
+ * Zero Dependencies: Optimized to run using only the Python Standard Library, ensuring maximum portability across any Linux distribution.
 
----
+ ---
 
-## 🛠 Features
+ ## 🛠 Features
 
-* **Recursive Processing:** Update all stacks within subdirectories in a single pass.
-* **Hash Comparison:** Recreates containers only if a new image hash is detected on the registry.
-* **Exclusion Support:** Skip specific directories using a `.dcuignore` file.
-* **Professional Output:** Clean, technical terminal UI with precise status reporting.
-* **Pre-flight Validation:** Checks for Docker socket permissions and dependencies before execution.
+ * Multithreaded Scanning: Processes multiple stacks concurrently for extreme speed.
+ * Staggered Launch: Prevents "429 Too Many Requests" errors from Docker Hub by spacing out registry queries.
+ * Force Mode: Option to bypass hash checks and trigger immediate updates.
+ * Triple-Check Validation: Recreates containers only if there's a real difference between the registry, the local cache, or the running container.
+ * Zero External Dependencies: No pip install required. Pure Python 3.
+ * Exclusion Support: Skip specific directories using a .dcuignore file.
 
----
+ ---
 
-## 🚫 Excluding Directories (.dcuignore)
+ ## 🚫 Excluding Directories (.dcuignore)
 
-If you use the `-a` or `--all` flag, you can prevent **ship** from touching specific directories by creating a file named `.dcuignore` in the root folder where you run the script.
+ If you use the -a or --all flag, you can prevent ship from touching specific directories by creating a file named .dcuignore in the root folder where you run the script.
 
-**Example `.dcuignore` content:**
-```text
-database_prod
-legacy_app_do_not_touch
-testing_environment
-```
-*The script will completely skip these folders during the scanning process.*
+ Example .dcuignore content:
+ text  database_prod  legacy_app_do_not_touch  testing_environment  
 
----
+ ---
 
-## 📋 Dependencies
+ ## 📋 Requirements
 
-| Requirement | Purpose | Documentation |
-| :--- | :--- | :--- |
-| **Docker Engine** | Core container runtime | [Official Docs](https://docs.docker.com/engine/install/) |
-| **Docker Compose V2** | CLI plugin for stack management | [Official Docs](https://docs.docker.com/compose/install/) |
-| **GNU Coreutils** | UI formatting via `fmt` | [GNU Project](https://www.gnu.org/software/coreutils/) |
+ | Requirement | Minimum Version | Recommended |
+ | :--- | :--- | :--- |
+ | Python 3 | 3.6+ (f-strings support) | 3.10+ |
+ | Docker Engine | 20.10+ | Latest |
+ | Docker Compose | V2 (Plugin) | Latest |
+ | OS | Linux / WSL2 | Any Linux with Fcntl support |
 
----
+ ---
 
-## 📖 How to Use
+ ## 📖 How to Use
 
-### Syntax
-`ship [options] [target_directories]`
+ ### Syntax
+ ship [options] [target_directories]
 
-### Available Parameters
+ ### Available Parameters
 
-| Parameter | Alias | Technical Description |
-| :--- | :--- | :--- |
-| `--all` | `-a` | Automatically scans all subdirectories for valid compose files. |
-| `--yes` | `-y` | Force mode: bypasses user confirmation before processing updates. |
-| `--prune` | `-p` | Executes `docker image prune -f` after the update cycle. |
-| `--verbose` | `-v` | Enables detailed stdout for technical debugging. |
-| `--help` | `-h` | Displays the help menu and version information. |
-| `--install` | | Deploys the script to `/usr/local/bin/ship`. |
+ | Parameter | Alias | Technical Description |
+ | :--- | :--- | :--- |
+ | --all | -a | Automatically scans all subdirectories for valid compose files. |
+ | --force | -f | Bypasses hash comparison and forces pull & recreate on all targets. |
+ | --yes | -y | Bypasses user confirmation before processing updates. |
+ | --prune | -p | Executes docker image prune -f after the update cycle. |
+ | --verbose | -v | Enables detailed technical report of every hash and ID compared. |
+ | --jobs | -j [N] | Sets the maximum number of concurrent worker threads (Default: 100). |
+ | --delay | -d [ms] | Sets the interval between thread launches in milliseconds (Default: 200). |
+ | --install | | Deploys the script to /usr/local/bin/ship. |
 
----
+ ---
 
-## 🪵 Error Logging
+ ## 🪵 Error Logging
 
-In case of execution failure, the script generates a technical log at:
-`~/.ship_errors.log`
+ In case of execution failure, the script generates a technical log at:
+ ~/.ship_errors.log
 
----
-*Developed by Felipe Urzúa in collaboration with Gemini AI.*
+ ---
+ Developed by Felipe Urzúa in collaboration with Gemini AI (v5.7.2).

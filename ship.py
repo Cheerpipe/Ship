@@ -8,15 +8,16 @@ import fcntl
 import json
 import time
 import threading
+import inspect # Added for safe source retrieval
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
 # Script: ship (Docker Compose Updater)
-# Version: 5.7.3 (Final) | Author: Felipe Urzúa & Gemini
+# Version: 5.7.4 (Installer Fix) | Author: Felipe Urzúa & Gemini
 # ==============================================================================
 
-VERSION = "5.7.3"
+VERSION = "5.7.4"
 AUTHOR = "Felipe Urzúa & Gemini"
 SLOGAN = "Don't sink the ship :D"
 LOCK_FILE = "/tmp/ship.pid"
@@ -25,8 +26,8 @@ LOG_FILE = os.path.expanduser("~/.ship_errors.log")
 # Network and concurrency configuration
 SCAN_DELAY_MS = 200  
 last_request_time = 0
-rate_lock = threading.Lock()   # Protects access to the Docker Hub API
-map_lock = threading.Lock()    # Protects the futures dictionary in multi-threaded context
+rate_lock = threading.Lock()
+map_lock = threading.Lock()
 
 # UI Colors and formatting
 RED, GREEN, YELLOW, CYAN = "\033[0;31m", "\033[0;32m", "\033[1;33m", "\033[0;36m"
@@ -57,10 +58,7 @@ def get_arch():
     return m
 
 def get_remote_digest(image, arch, verbose, delay_ms):
-    """
-    Retrieves the SHA256 Digest of an image from the remote registry.
-    Implements a global delay (delay_ms) to prevent Rate Limit blocks.
-    """
+    """Retrieves the SHA256 Digest from remote registry with rate limiting."""
     global last_request_time
     with rate_lock:
         current_time = time.time() * 1000
@@ -82,11 +80,7 @@ def get_remote_digest(image, arch, verbose, delay_ms):
     return global_match.group(1) if global_match else None
 
 def check_stack(directory, verbose, delay_ms, force=False):
-    """
-    Analyzes a directory to determine if its Docker services require an update.
-    Compares remote vs local Digest, and local Image ID vs running Image ID.
-    If force=True, marks the stack for update immediately, bypassing checks.
-    """
+    """Analyzes a directory to determine if updates are needed."""
     yaml_files = ["docker-compose.yml", "docker-compose.yaml"]
     yaml_path = next((os.path.join(directory, f) for f in yaml_files if os.path.exists(os.path.join(directory, f))), None)
     if not yaml_path: return "NO_COMPOSE", ""
@@ -156,22 +150,38 @@ def check_stack(directory, verbose, delay_ms, force=False):
     return ("UPDATE" if needs_update else "OK"), log_acc
 
 def install_ship():
-    """Installs the script into /usr/local/bin for global execution."""
+    """Installs the script into /usr/local/bin. Fixed for curl execution."""
     if os.geteuid() != 0:
         print(f"{RED}Error: Run with sudo.{NC}"); sys.exit(1)
+    
     dest = "/usr/local/bin/ship"
     if os.path.exists(dest):
         with open(dest, 'r') as f:
             v_match = re.search(r'VERSION = "([^"]+)"', f.read())
-            print(f"{YELLOW}Existing: v{v_match.group(1) if v_match else 'Old'} | New: v{VERSION}{NC}")
+            v_old = v_match.group(1) if v_match else 'Old'
+            print(f"{YELLOW}Existing: v{v_old} | New: v{VERSION}{NC}")
         if input("Overwrite? [y/N] ").lower() != 'y': sys.exit(0)
-    import shutil
-    shutil.copyfile(__file__, dest)
-    os.chmod(dest, 0o755)
-    print(f"{GREEN}Success: ship v{VERSION} installed.{NC}"); sys.exit(0)
+
+    try:
+        # If running via -c (curl), get code from sys.modules
+        if "__file__" not in globals():
+            import __main__
+            source_code = inspect.getsource(__main__)
+        else:
+            with open(__file__, 'r') as f:
+                source_code = f.read()
+
+        with open(dest, 'w') as f:
+            f.write(source_code)
+        
+        os.chmod(dest, 0o755)
+        print(f"{GREEN}Success: ship v{VERSION} installed.{NC}")
+    except Exception as e:
+        print(f"{RED}Installation failed: {str(e)}{NC}")
+    sys.exit(0)
 
 def spawn_tasks(executor, targets, futures_map, verbose, delay, force):
-    """Background thread that spawns scan tasks with a staggered launch (delay)."""
+    """Background thread that spawns scan tasks with a staggered launch."""
     for target in targets:
         with map_lock:
             future = executor.submit(check_stack, target, verbose, delay, force)
@@ -179,7 +189,7 @@ def spawn_tasks(executor, targets, futures_map, verbose, delay, force):
         time.sleep(delay / 1000.0)
 
 def main():
-    """Main entry point: Handles arguments, scanning orchestration, and deployment."""
+    """Main entry point: Handles arguments, scanning, and deployment."""
     import argparse
     parser = argparse.ArgumentParser(
         description=f"ship v{VERSION} - Docker Compose Updater",
@@ -187,21 +197,19 @@ def main():
         add_help=False
     )
     
-    # Standard Options
     group = parser.add_argument_group(f"{CYAN}{BOLD}Available Parameters{NC}")
-    group.add_argument("-a", "--all", action="store_true", help="Scan all subdirectories for valid compose files.")
-    group.add_argument("-f", "--force", action="store_true", help="Bypass hash comparison and force update on targets.")
-    group.add_argument("-y", "--yes", action="store_true", help="Bypass user confirmation before processing.")
-    group.add_argument("-p", "--prune", action="store_true", help="Execute 'docker image prune -f' after updates.")
-    group.add_argument("-v", "--verbose", action="store_true", help="Enable detailed technical report of hashes and IDs.")
-    group.add_argument("-j", "--jobs", type=int, default=100, help="Max concurrent worker threads (Default: 100).")
-    group.add_argument("-d", "--delay", type=int, default=SCAN_DELAY_MS, help="Interval between thread launches in ms (Default: 200).")
-    group.add_argument("-h", "--help", action="help", help="Show this help message and exit.")
-    group.add_argument("--install", action="store_true", help="Deploy the script to /usr/local/bin/ship.")
-    parser.add_argument("targets", nargs="*", help="Specific directories to scan.")
+    group.add_argument("-a", "--all", action="store_true", help="Scan all subdirectories.")
+    group.add_argument("-f", "--force", action="store_true", help="Bypass hash checks.")
+    group.add_argument("-y", "--yes", action="store_true", help="Bypass confirmation.")
+    group.add_argument("-p", "--prune", action="store_true", help="Prune images after update.")
+    group.add_argument("-v", "--verbose", action="store_true", help="Detailed reports.")
+    group.add_argument("-j", "--jobs", type=int, default=100, help="Max threads (Default: 100).")
+    group.add_argument("-d", "--delay", type=int, default=SCAN_DELAY_MS, help="Launch delay in ms (Default: 200).")
+    group.add_argument("-h", "--help", action="help", help="Show this help message.")
+    group.add_argument("--install", action="store_true", help="Deploy to /usr/local/bin/ship.")
+    parser.add_argument("targets", nargs="*")
 
     args = parser.parse_args()
-
     if args.install: install_ship()
     display_header()
     
@@ -217,8 +225,7 @@ def main():
             if os.path.isdir(t): valid_targets.append(t)
 
     if not valid_targets:
-        print(f"{YELLOW}No targets found. Use -a to scan all or specify a directory.{NC}")
-        sys.exit(0)
+        print(f"{YELLOW}No targets found. Use -a or specify a directory.{NC}"); sys.exit(0)
 
     print(f"{BOLD}Scanning {len(valid_targets)} stacks...{NC}")
 
@@ -249,14 +256,12 @@ def main():
             time.sleep(0.05)
     
     print(f"\r{CLEAR_LINE}", end="")
-
     if not updatable:
         print(f"\n{GREEN}{BOLD}Everything is at the latest version.{NC}"); sys.exit(0)
 
     status_label = "Ready to update (Force Mode):" if args.force else "Updates available for:"
     print(f"\n{CYAN}{BOLD}{status_label}{NC} {BOLD}{' '.join(updatable)}{NC}")
-    
-    if not args.yes and input(f"\nProceed with update? [Y/n] ").lower() not in ['', 'y']: sys.exit(0)
+    if not args.yes and input(f"\nProceed? [Y/n] ").lower() not in ['', 'y']: sys.exit(0)
 
     f_lock = open(LOCK_FILE, 'w')
     try:

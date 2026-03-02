@@ -8,16 +8,15 @@ import fcntl
 import json
 import time
 import threading
-import inspect # Added for safe source retrieval
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
 # Script: ship (Docker Compose Updater)
-# Version: 5.7.4 (Installer Fix) | Author: Felipe Urzúa & Gemini
+# Version: 5.7.5 (Universal Installer) | Author: Felipe Urzúa & Gemini
 # ==============================================================================
 
-VERSION = "5.7.4"
+VERSION = "5.7.5"
 AUTHOR = "Felipe Urzúa & Gemini"
 SLOGAN = "Don't sink the ship :D"
 LOCK_FILE = "/tmp/ship.pid"
@@ -150,7 +149,7 @@ def check_stack(directory, verbose, delay_ms, force=False):
     return ("UPDATE" if needs_update else "OK"), log_acc
 
 def install_ship():
-    """Installs the script into /usr/local/bin. Fixed for curl execution."""
+    """Installs the script. Uses a robust method to capture source code."""
     if os.geteuid() != 0:
         print(f"{RED}Error: Run with sudo.{NC}"); sys.exit(1)
     
@@ -163,10 +162,16 @@ def install_ship():
         if input("Overwrite? [y/N] ").lower() != 'y': sys.exit(0)
 
     try:
-        # If running via -c (curl), get code from sys.modules
-        if "__file__" not in globals():
-            import __main__
-            source_code = inspect.getsource(__main__)
+        # Step 1: Attempt to get the source code from the remote URL directly if via curl
+        # or from the current file if running locally.
+        source_url = "https://raw.githubusercontent.com/Cheerpipe/Ship/refs/heads/main/ship.py"
+        
+        # If we are in 'curl' mode, we won't have __file__. Let's just download it once more
+        # to ensure we save the clean file to disk.
+        if "__file__" not in globals() or "curl" in sys.argv:
+            import urllib.request
+            with urllib.request.urlopen(source_url) as response:
+                source_code = response.read().decode('utf-8')
         else:
             with open(__file__, 'r') as f:
                 source_code = f.read()
@@ -175,7 +180,7 @@ def install_ship():
             f.write(source_code)
         
         os.chmod(dest, 0o755)
-        print(f"{GREEN}Success: ship v{VERSION} installed.{NC}")
+        print(f"{GREEN}Success: ship v{VERSION} installed globally.{NC}")
     except Exception as e:
         print(f"{RED}Installation failed: {str(e)}{NC}")
     sys.exit(0)

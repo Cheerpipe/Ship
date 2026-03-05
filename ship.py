@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 VERSION = "5.8.2"
 AUTHOR = "Felipe Urzúa"
 SLOGAN = "Don't sink the ship :D"
-LOCK_FILE = "/tmp/ship.pid"
+LOCK_FILE = os.path.expanduser("~/.ship.pid")
 
 SCAN_DELAY_MS = 200
 DOCKER_BUILDX_TIMEOUT = 600
@@ -59,6 +59,7 @@ class Config:
         self.last_request_time = 0
         self.rate_lock = threading.Lock()
         self.map_lock = threading.Lock()
+        self.print_lock = threading.Lock()
         self.set_image_version = None
     
     def set_log_path(self, path):
@@ -116,16 +117,19 @@ def run_cmd(cmd, timeout=DOCKER_CMD_TIMEOUT):
     Returns:
         Tuple of (stdout, stderr, success_flag)
     """
-    if not cmd or not isinstance(cmd, str):
+    if not cmd:
         error_msg = "Invalid command"
         if logger:
             logger.error(error_msg)
         return "", error_msg, False
     
+    # Check if cmd is a string and needs parsing, though we expect lists now for safety
+    if isinstance(cmd, str):
+        cmd = shlex.split(cmd)
+        
     try:
         result = subprocess.run(
             cmd,
-            shell=True,
             capture_output=True,
             text=True,
             timeout=timeout
@@ -147,7 +151,7 @@ def run_cmd(cmd, timeout=DOCKER_CMD_TIMEOUT):
 
 def check_docker_installed():
     """Validates that Docker is installed and accessible."""
-    _, _, success = run_cmd("docker --version", timeout=10)
+    _, _, success = run_cmd(["docker", "--version"], timeout=10)
     if not success:
         print(f"{RED}Error: Docker is not installed or not in PATH.{NC}")
         sys.exit(1)
@@ -207,19 +211,27 @@ def get_remote_digest(image, arch, config):
     Returns:
         SHA256 digest string, or None if not found, or "RATE_LIMIT_ERROR"
     """
+    sleep_time = 0
     with config.rate_lock:
         current_time = time.time() * 1000
         elapsed = current_time - config.last_request_time
         if elapsed < config.delay_ms:
-            time.sleep((config.delay_ms - elapsed) / 1000.0)
-        config.last_request_time = time.time() * 1000
+            sleep_time = (config.delay_ms - elapsed) / 1000.0
+        # Update the timestamp immediately so the next thread knows
+        # when we *expect* to finish starting our request
+        config.last_request_time = current_time + (sleep_time * 1000)
+
+    if sleep_time > 0:
+        time.sleep(sleep_time)
+        
+    cmd_list = ["docker", "buildx", "imagetools", "inspect", image]
     
-    # Safely quote the image name
-    safe_image = shlex.quote(image)
     if config.verbose:
-        print(f"[VERBOSE] Getting remote digest for {image} on {arch}")
-        print(f"[VERBOSE] Command: docker buildx imagetools inspect {safe_image}")
-    stdout, stderr, success = run_cmd(f"docker buildx imagetools inspect {safe_image}", timeout=DOCKER_BUILDX_TIMEOUT)
+        with config.print_lock:
+            print(f"[VERBOSE] Getting remote digest for {image} on {arch}")
+            print(f"[VERBOSE] Command: {' '.join(cmd_list)}")
+            
+    stdout, stderr, success = run_cmd(cmd_list, timeout=DOCKER_BUILDX_TIMEOUT)
     
     if not success:
         if config.verbose:
@@ -249,7 +261,8 @@ def get_remote_digest(image, arch, config):
                 result = digest_match.group(1) if digest_match else None
     
     if config.verbose:
-        print(f"[VERBOSE] Remote digest result: {result}")
+        with config.print_lock:
+            print(f"[VERBOSE] Remote digest result: {result}")
     return result
 
 def check_stack(directory, config):
@@ -263,7 +276,7 @@ def check_stack(directory, config):
     Returns:
         Tuple of (ScanStatus, logs_string, list_of_service_names)
     """
-    yaml_files = ["docker-compose.yml", "docker-compose.yaml"]
+    yaml_files = ["compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml"]
     yaml_path = next(
         (os.path.join(directory, f) for f in yaml_files if os.path.exists(os.path.join(directory, f))),
         None
@@ -275,21 +288,20 @@ def check_stack(directory, config):
     if config.force:
         log_msg = f"\n    {YELLOW}├─ MODE: FORCE ENABLED{NC}\n    {YELLOW}└─ STATUS: UPDATE TRIGGERED BY USER{NC}"
         # Get service names for force mode
-        config_json, _, _ = run_cmd(f"docker compose -f {shlex.quote(yaml_path)} config --format json")
+        config_json, _, _ = run_cmd(["docker", "compose", "-f", yaml_path, "config", "--format", "json"])
         force_services = []
         try:
             services = json.loads(config_json).get('services', {})
             force_services = list(services.keys())
         except json.JSONDecodeError:
-            imgs, _, _ = run_cmd(f"docker compose -f {shlex.quote(yaml_path)} config --images")
+            imgs, _, _ = run_cmd(["docker", "compose", "-f", yaml_path, "config", "--images"])
             force_services = [f"svc_{i}" for i, img in enumerate(imgs.splitlines()) if img]
         return ScanStatus.UPDATE, log_msg, force_services
     
     abs_path = os.path.abspath(directory)
     
     # Get running containers
-    safe_yaml = shlex.quote(yaml_path)
-    compose_ps, _, _ = run_cmd(f"docker compose -f {safe_yaml} ps --format json")
+    compose_ps, _, _ = run_cmd(["docker", "compose", "-f", yaml_path, "ps", "--format", "json"])
     ps_data = []
     try:
         ps_data = json.loads(compose_ps)
@@ -299,7 +311,7 @@ def check_stack(directory, config):
         logger.debug(f"Failed to parse compose ps for {directory}: {e}") if logger else None
     
     # Get service configuration
-    config_json, _, _ = run_cmd(f"docker compose -f {safe_yaml} config --format json")
+    config_json, _, _ = run_cmd(["docker", "compose", "-f", yaml_path, "config", "--format", "json"])
     needs_update, rate_limited, log_acc = False, False, ""
     arch = get_arch()
     services_to_update = []
@@ -308,7 +320,7 @@ def check_stack(directory, config):
         services = json.loads(config_json).get('services', {})
     except json.JSONDecodeError:
         logger.debug(f"Failed to parse docker-compose config, falling back to image list") if logger else None
-        imgs, _, _ = run_cmd(f"docker compose -f {safe_yaml} config --images")
+        imgs, _, _ = run_cmd(["docker", "compose", "-f", yaml_path, "config", "--images"])
         services = {f"svc_{i}": {"image": img} for i, img in enumerate(imgs.splitlines()) if img}
     
     for svc_name, svc_info in services.items():
@@ -319,31 +331,37 @@ def check_stack(directory, config):
         safe_img = shlex.quote(img)
         
         if config.verbose:
-            print(f"[VERBOSE] Inspecting local image {img}")
+            with config.print_lock:
+                print(f"[VERBOSE] Inspecting local image {img}")
         # Get local image info
-        local_inspect, _, _ = run_cmd(f"docker image inspect {safe_img} --format '{{{{json .RepoDigests}}}}|{{{{.Id}}}}'")
+        local_inspect, _, _ = run_cmd(["docker", "image", "inspect", img, "--format", "{{json .RepoDigests}}|{{.Id}}"])
         if config.verbose:
-            print(f"[VERBOSE] Local image inspect output: {local_inspect}")
+            with config.print_lock:
+                print(f"[VERBOSE] Local image inspect output: {local_inspect}")
         local_dig = next(iter(SHA256_PATTERN.findall(local_inspect.split('|')[0])), None) if '|' in local_inspect else None
         local_id = local_inspect.split('|')[1] if '|' in local_inspect else "N/A"
         if config.verbose:
-            print(f"[VERBOSE] Extracted local digest: {local_dig}, local ID: {local_id}")
+            with config.print_lock:
+                print(f"[VERBOSE] Extracted local digest: {local_dig}, local ID: {local_id}")
         
         # Get running container ID
         container_id = next((c.get('ID') or c.get('Id') for c in ps_data if c.get('Service') == svc_name), None)
         
         if container_id:
-            running_img_id, _, _ = run_cmd(f"docker inspect --format '{{{{.Image}}}}' {shlex.quote(container_id)}")
+            running_img_id, _, _ = run_cmd(["docker", "inspect", "--format", "{{.Image}}", container_id])
         else:
             project_name = os.path.basename(abs_path).lower().replace("_", "").replace("-", "")
-            cmd = f"docker inspect --format '{{{{.Image}}}}' {shlex.quote(f'{project_name}-{svc_name}-1')} 2>/dev/null || docker inspect --format '{{{{.Image}}}}' {shlex.quote(svc_name)} 2>/dev/null"
-            running_img_id, _, _ = run_cmd(cmd)
+            # We try the canonical project-service-1 format first, if it fails, then the raw service name
+            running_img_id, _, success_id = run_cmd(["docker", "inspect", "--format", "{{.Image}}", f"{project_name}-{svc_name}-1"])
+            if not success_id:
+                running_img_id, _, _ = run_cmd(["docker", "inspect", "--format", "{{.Image}}", svc_name])
         
         if not running_img_id:
             running_img_id = "NOT_FOUND"
         
         if config.verbose:
-            print(f"[VERBOSE] Running image ID for {svc_name}: {running_img_id}")
+            with config.print_lock:
+                print(f"[VERBOSE] Running image ID for {svc_name}: {running_img_id}")
         
         # Get remote digest
         remote_hash = get_remote_digest(img, arch, config)
@@ -604,7 +622,7 @@ with the latest versions."""
     # Handle set-image-version mode
     if config.set_image_version:
         target = args.targets[0]
-        yaml_files = ["docker-compose.yml", "docker-compose.yaml"]
+        yaml_files = ["compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml"]
         yaml_path = next(
             (os.path.join(target, f) for f in yaml_files if os.path.exists(os.path.join(target, f))),
             None
@@ -683,7 +701,7 @@ with the latest versions."""
             
             # Pull images
             print("   ├─ Pulling remote images... ", end="", flush=True)
-            pull_out, pull_err, pull_success = run_cmd(f"docker compose -f {safe_yaml} pull")
+            pull_out, pull_err, pull_success = run_cmd(["docker", "compose", "-f", yaml_path, "pull"])
             if not pull_success:
                 print(f"{RED}Failed{NC}.")
                 if config.verbose:
@@ -691,11 +709,10 @@ with the latest versions."""
                 sys.exit(1)
             print("Done.")
             
-            # Recreate containers
-            recreate_flag = "--force-recreate" if config.force else ""
+            recreate_flags = ["--force-recreate"] if config.force else []
             mode_text = "Force" if config.force else "Standard"
             print(f"   └─ Recreating ({mode_text})... ", end="", flush=True)
-            up_cmd = f"docker compose -f {safe_yaml} up -d {recreate_flag}".strip()
+            up_cmd = ["docker", "compose", "-f", yaml_path, "up", "-d"] + recreate_flags
             up_out, up_err, up_success = run_cmd(up_cmd)
             if up_success:
                 print(f"{GREEN}[SUCCESS]{NC}")
@@ -769,17 +786,18 @@ with the latest versions."""
                         
                         try:
                             status, logs, services = future.result()
-                            print(
-                                f"\r{CLEAR_LINE}{GRAY}[{count}/{len(valid_targets)}]{NC} Checked: {BOLD}{target}{NC}",
-                                end="",
-                                flush=True
-                            )
-                            
-                            if status == ScanStatus.UPDATE:
-                                updatable.append({"directory": target, "services": services})
-                            
-                            if logs:
-                                print(f"\n{CYAN}Analysis:{NC} {BOLD}{target}{NC}{logs}\n")
+                            with config.print_lock:
+                                print(
+                                    f"\r{CLEAR_LINE}{GRAY}[{count}/{len(valid_targets)}]{NC} Checked: {BOLD}{target}{NC}",
+                                    end="",
+                                    flush=True
+                                )
+                                
+                                if status == ScanStatus.UPDATE:
+                                    updatable.append({"directory": target, "services": services})
+                                
+                                if logs:
+                                    print(f"\n{CYAN}Analysis:{NC} {BOLD}{target}{NC}{logs}\n")
                         except Exception as e:
                             logger.error(f"Error processing {target}: {e}")
                             print(f"\n{RED}Error scanning {target}: {e}{NC}")
@@ -839,7 +857,7 @@ with the latest versions."""
                 yaml = next(
                     (
                         os.path.join(target, f)
-                        for f in ["docker-compose.yml", "docker-compose.yaml"]
+                        for f in ["compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml"]
                         if os.path.exists(os.path.join(target, f))
                     ),
                     None
@@ -862,7 +880,7 @@ with the latest versions."""
                     with open(config.log_path, "a") as log:
                         # Pull images
                         print(f"   {NC}├─ [INFO] Pulling remote images... ", end="", flush=True)
-                        pull_cmd = f"docker compose -f {safe_yaml} pull"
+                        pull_cmd = ["docker", "compose", "-f", yaml, "pull"]
                         pull_out, pull_err, pull_success = run_cmd(pull_cmd)
                         
                         if not pull_success:
@@ -875,11 +893,11 @@ with the latest versions."""
                         print("Done.")
                         
                         # Recreate containers
-                        recreate_flag = "--force-recreate" if config.force else ""
+                        recreate_flags = ["--force-recreate"] if config.force else []
                         mode_text = "Force" if config.force else "Standard"
                         print(f"   {GREEN}└─ [NEW] Recreating ({mode_text})...{NC}", end="", flush=True)
                         
-                        up_cmd = f"docker compose -f {safe_yaml} up -d {recreate_flag}".strip()
+                        up_cmd = ["docker", "compose", "-f", yaml, "up", "-d"] + recreate_flags
                         up_out, up_err, up_success = run_cmd(up_cmd)
                         
                         status_text = f" {GREEN if up_success else RED}[{'SUCCESS' if up_success else 'FAILED'}].{NC}"
@@ -905,7 +923,7 @@ with the latest versions."""
                 timestamp = get_timestamp()
                 prefix = f"{timestamp} " if timestamp else ""
                 print(f"\n{prefix}{YELLOW}➜ SYSTEM CLEANUP: Pruning unused Docker images...{NC}", end="", flush=True)
-                _, _, prune_success = run_cmd("docker image prune -f")
+                _, _, prune_success = run_cmd(["docker", "image", "prune", "-f"])
                 if prune_success:
                     print(f" {GREEN}[SUCCESS]{NC}")
                     logger.info("Docker image prune completed successfully")

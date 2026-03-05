@@ -17,11 +17,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
 # Script: ship (Docker Compose Updater)
-# Version: 5.8.2 (Cleanup Feedback) | Author: Felipe Urzúa & Gemini
+# Version: 5.8.2 (Cleanup Feedback) | Author: Felipe Urzúa
 # ==============================================================================
 
 VERSION = "5.8.2"
-AUTHOR = "Felipe Urzúa & Gemini"
+AUTHOR = "Felipe Urzúa"
 SLOGAN = "Don't sink the ship :D"
 LOCK_FILE = "/tmp/ship.pid"
 
@@ -90,10 +90,15 @@ class Config:
 
 # Global logger instance
 logger = None
+# Global config instance
+config = None
 
 def get_timestamp():
     """Generates a formatted timestamp for logging purposes."""
-    return f"{GRAY}[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]{NC}"
+    global config
+    if config and hasattr(config, 'verbose') and config.verbose:
+        return f"{GRAY}[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]{NC}"
+    return ""
 
 def display_header():
     """Prints the script header to the terminal."""
@@ -547,7 +552,8 @@ with the latest versions."""
         print(f"{RED}Error: Jobs must be at least 1.{NC}")
         sys.exit(1)
     
-    # Initialize config
+    # Initialize global config
+    global config
     config = Config()
     config.verbose = args.verbose
     config.delay_ms = args.delay
@@ -826,7 +832,9 @@ with the latest versions."""
                 target = item["directory"]
                 services = item["services"]
                 services_str = ' '.join(services)
-                print(f"{get_timestamp()} [{i}/{len(updatable)}] {CYAN}➜ PROCESSING STACK:{NC} {BOLD}{services_str}{NC}")
+                timestamp = get_timestamp()
+                prefix = f"{timestamp} [{i}/{len(updatable)}]" if timestamp else f"[{i}/{len(updatable)}]"
+                print(f"{prefix} {CYAN}➜ PROCESSING STACK:{NC} {BOLD}{services_str}{NC}")
                 
                 yaml = next(
                     (
@@ -888,11 +896,15 @@ with the latest versions."""
                     logger.error(f"Failed to write to log file: {e}")
                     print(f"   {RED}└─ ERROR: Could not write logs{NC}")
                 
-                print(f"   {GRAY}{'─'*54}{NC}")
+                # Adjust separator length based on timestamp presence
+                separator_length = 54 if timestamp else 50
+                print(f"   {GRAY}{'─'*separator_length}{NC}")
             
             # Cleanup phase
             if config.prune:
-                print(f"\n{get_timestamp()} {YELLOW}➜ SYSTEM CLEANUP: Pruning unused Docker images...{NC}", end="", flush=True)
+                timestamp = get_timestamp()
+                prefix = f"{timestamp} " if timestamp else ""
+                print(f"\n{prefix}{YELLOW}➜ SYSTEM CLEANUP: Pruning unused Docker images...{NC}", end="", flush=True)
                 _, _, prune_success = run_cmd("docker image prune -f")
                 if prune_success:
                     print(f" {GREEN}[SUCCESS]{NC}")

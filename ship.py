@@ -17,17 +17,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
 # Script: ship (Docker Compose Updater)
-# Version: 5.7.9 (Cleanup Feedback) | Author: Felipe Urzúa & Gemini
+# Version: 5.8.2 (Cleanup Feedback) | Author: Felipe Urzúa & Gemini
 # ==============================================================================
 
-VERSION = "5.7.9"
+VERSION = "5.8.2"
 AUTHOR = "Felipe Urzúa & Gemini"
 SLOGAN = "Don't sink the ship :D"
 LOCK_FILE = "/tmp/ship.pid"
 
 SCAN_DELAY_MS = 200
-DOCKER_BUILDX_TIMEOUT = 60
-DOCKER_CMD_TIMEOUT = 60
+DOCKER_BUILDX_TIMEOUT = 600
+DOCKER_CMD_TIMEOUT = 600
 
 # ANSI Color codes
 RED, GREEN, YELLOW, CYAN = "\033[0;31m", "\033[0;32m", "\033[1;33m", "\033[0;36m"
@@ -59,6 +59,7 @@ class Config:
         self.last_request_time = 0
         self.rate_lock = threading.Lock()
         self.map_lock = threading.Lock()
+        self.set_image_version = None
     
     def set_log_path(self, path):
         """Set custom log path."""
@@ -110,6 +111,12 @@ def run_cmd(cmd, timeout=DOCKER_CMD_TIMEOUT):
     Returns:
         Tuple of (stdout, stderr, success_flag)
     """
+    if not cmd or not isinstance(cmd, str):
+        error_msg = "Invalid command"
+        if logger:
+            logger.error(error_msg)
+        return "", error_msg, False
+    
     try:
         result = subprocess.run(
             cmd,
@@ -120,14 +127,17 @@ def run_cmd(cmd, timeout=DOCKER_CMD_TIMEOUT):
         )
         return result.stdout.strip(), result.stderr.strip(), result.returncode == 0
     except subprocess.TimeoutExpired:
-        error_msg = f"Command timeout after {timeout}s: {cmd}"
-        logger.error(error_msg) if logger else None
+        error_msg = f"Command timeout after {timeout}s"
+        if logger:
+            logger.error(error_msg)
         return "", error_msg, False
     except FileNotFoundError as e:
-        logger.error(f"Command not found: {e}") if logger else None
+        if logger:
+            logger.error(f"Command not found: {e}")
         return "", str(e), False
     except Exception as e:
-        logger.error(f"Command execution failed: {e}") if logger else None
+        if logger:
+            logger.error(f"Command execution failed: {e}")
         return "", str(e), False
 
 def check_docker_installed():
@@ -201,27 +211,41 @@ def get_remote_digest(image, arch, config):
     
     # Safely quote the image name
     safe_image = shlex.quote(image)
+    if config.verbose:
+        print(f"[VERBOSE] Getting remote digest for {image} on {arch}")
+        print(f"[VERBOSE] Command: docker buildx imagetools inspect {safe_image}")
     stdout, stderr, success = run_cmd(f"docker buildx imagetools inspect {safe_image}", timeout=DOCKER_BUILDX_TIMEOUT)
     
     if not success:
+        if config.verbose:
+            print(f"[VERBOSE] Command failed: {stderr}")
         if any(err in stderr for err in ["429 Too Many Requests", "toomanyrequests"]):
-            return "RATE_LIMIT_ERROR"
-        logger.debug(f"Failed to inspect image {image}: {stderr}") if logger else None
-        return None
+            result = "RATE_LIMIT_ERROR"
+        else:
+            logger.debug(f"Failed to inspect image {image}: {stderr}") if logger else None
+            result = None
+    else:
+        if config.verbose:
+            print(f"[VERBOSE] Command output: {stdout[:500]}..." if len(stdout) > 500 else f"[VERBOSE] Command output: {stdout}")
+        if not stdout:
+            result = None
+        else:
+            # Try to find digest with platform-specific match
+            match = FULL_SHA_WITH_PLATFORM_PATTERN.search(stdout)
+            if match:
+                digest_match = SHA256_PATTERN.search(match.group())
+                if digest_match:
+                    result = digest_match.group()
+                else:
+                    result = None
+            else:
+                # Fallback to global digest
+                digest_match = DIGEST_PATTERN.search(stdout)
+                result = digest_match.group(1) if digest_match else None
     
-    if not stdout:
-        return None
-    
-    # Try to find digest with platform-specific match
-    match = FULL_SHA_WITH_PLATFORM_PATTERN.search(stdout)
-    if match:
-        digest_match = SHA256_PATTERN.search(match.group())
-        if digest_match:
-            return digest_match.group()
-    
-    # Fallback to global digest
-    digest_match = DIGEST_PATTERN.search(stdout)
-    return digest_match.group(1) if digest_match else None
+    if config.verbose:
+        print(f"[VERBOSE] Remote digest result: {result}")
+    return result
 
 def check_stack(directory, config):
     """
@@ -232,7 +256,7 @@ def check_stack(directory, config):
         config: Config instance
         
     Returns:
-        Tuple of (ScanStatus, logs_string)
+        Tuple of (ScanStatus, logs_string, list_of_service_names)
     """
     yaml_files = ["docker-compose.yml", "docker-compose.yaml"]
     yaml_path = next(
@@ -241,11 +265,20 @@ def check_stack(directory, config):
     )
     
     if not yaml_path:
-        return ScanStatus.NO_COMPOSE, ""
+        return ScanStatus.NO_COMPOSE, "", []
     
     if config.force:
         log_msg = f"\n    {YELLOW}├─ MODE: FORCE ENABLED{NC}\n    {YELLOW}└─ STATUS: UPDATE TRIGGERED BY USER{NC}"
-        return ScanStatus.UPDATE, log_msg
+        # Get service names for force mode
+        config_json, _, _ = run_cmd(f"docker compose -f {shlex.quote(yaml_path)} config --format json")
+        force_services = []
+        try:
+            services = json.loads(config_json).get('services', {})
+            force_services = list(services.keys())
+        except json.JSONDecodeError:
+            imgs, _, _ = run_cmd(f"docker compose -f {shlex.quote(yaml_path)} config --images")
+            force_services = [f"svc_{i}" for i, img in enumerate(imgs.splitlines()) if img]
+        return ScanStatus.UPDATE, log_msg, force_services
     
     abs_path = os.path.abspath(directory)
     
@@ -264,6 +297,7 @@ def check_stack(directory, config):
     config_json, _, _ = run_cmd(f"docker compose -f {safe_yaml} config --format json")
     needs_update, rate_limited, log_acc = False, False, ""
     arch = get_arch()
+    services_to_update = []
     
     try:
         services = json.loads(config_json).get('services', {})
@@ -279,10 +313,16 @@ def check_stack(directory, config):
         
         safe_img = shlex.quote(img)
         
+        if config.verbose:
+            print(f"[VERBOSE] Inspecting local image {img}")
         # Get local image info
         local_inspect, _, _ = run_cmd(f"docker image inspect {safe_img} --format '{{{{json .RepoDigests}}}}|{{{{.Id}}}}'")
+        if config.verbose:
+            print(f"[VERBOSE] Local image inspect output: {local_inspect}")
         local_dig = next(iter(SHA256_PATTERN.findall(local_inspect.split('|')[0])), None) if '|' in local_inspect else None
         local_id = local_inspect.split('|')[1] if '|' in local_inspect else "N/A"
+        if config.verbose:
+            print(f"[VERBOSE] Extracted local digest: {local_dig}, local ID: {local_id}")
         
         # Get running container ID
         container_id = next((c.get('ID') or c.get('Id') for c in ps_data if c.get('Service') == svc_name), None)
@@ -297,6 +337,9 @@ def check_stack(directory, config):
         if not running_img_id:
             running_img_id = "NOT_FOUND"
         
+        if config.verbose:
+            print(f"[VERBOSE] Running image ID for {svc_name}: {running_img_id}")
+        
         # Get remote digest
         remote_hash = get_remote_digest(img, arch, config)
         if remote_hash == "RATE_LIMIT_ERROR":
@@ -307,28 +350,31 @@ def check_stack(directory, config):
         svc_needs_pull = remote_hash and local_dig and remote_hash != local_dig
         svc_needs_recreate = local_id != "N/A" and running_img_id != "NOT_FOUND" and local_id != running_img_id
         
-        if config.verbose:
-            log_acc += f"\n    {BOLD}Service:{NC} {svc_name}"
-            log_acc += f"\n    {GRAY}├─ Image:    {NC}{img}"
-            log_acc += f"\n    {GRAY}├─ Remote D: {NC}{YELLOW}{remote_hash or 'N/A'}{NC}"
-            log_acc += f"\n    {GRAY}├─ Local D:  {NC}{CYAN}{local_dig or 'N/A'}{NC}"
-            log_acc += f"\n    {GRAY}├─ Local ID: {NC}{GRAY}{local_id[:15]}...{NC}"
-            log_acc += f"\n    {GRAY}└─ Run ID:   {NC}{GRAY}{running_img_id[:15]}...{NC}"
-            
-            if svc_needs_pull:
-                log_acc += f"\n    {RED}└─ STATUS: PULL REQUIRED{NC}"
-            elif svc_needs_recreate:
-                log_acc += f"\n    {YELLOW}└─ STATUS: RECREATE REQUIRED (ID MISMATCH){NC}"
-            else:
-                log_acc += f"\n    {GREEN}└─ STATUS: UP TO DATE{NC}"
+        log_acc += f"\n    {BOLD}Service:{NC} {svc_name}"
+        log_acc += f"\n    {GRAY}├─ Image:    {NC}{img}"
+        log_acc += f"\n    {GRAY}├─ Remote D: {NC}{YELLOW}{remote_hash or 'N/A'}{NC}"
+        log_acc += f"\n    {GRAY}├─ Local D:  {NC}{CYAN}{local_dig or 'N/A'}{NC}"
+        log_acc += f"\n    {GRAY}├─ Local ID: {NC}{GRAY}{local_id}{NC}"
+        log_acc += f"\n    {GRAY}└─ Run ID:   {NC}{GRAY}{running_img_id}{NC}"
+        log_acc += f"\n    {GRAY}├─ Comparisons:{NC}"
+        log_acc += f"\n    {GRAY}│  ├─ Remote Digest == Local Digest: {remote_hash == local_dig if remote_hash and local_dig else 'Cannot compare (missing data)'}{NC}"
+        log_acc += f"\n    {GRAY}│  └─ Local Image ID == Running Image ID: {local_id == running_img_id if local_id != 'N/A' and running_img_id != 'NOT_FOUND' else 'Cannot compare (missing data)'}{NC}"
+        
+        if svc_needs_pull:
+            log_acc += f"\n    {RED}└─ STATUS: PULL REQUIRED{NC}"
+        elif svc_needs_recreate:
+            log_acc += f"\n    {YELLOW}└─ STATUS: RECREATE REQUIRED (ID MISMATCH){NC}"
+        else:
+            log_acc += f"\n    {GREEN}└─ STATUS: UP TO DATE{NC}"
         
         if svc_needs_pull or svc_needs_recreate:
             needs_update = True
+            services_to_update.append(svc_name)
     
     if rate_limited:
-        return ScanStatus.RATE_LIMIT, log_acc
+        return ScanStatus.RATE_LIMIT, log_acc, []
     
-    return (ScanStatus.UPDATE if needs_update else ScanStatus.OK), log_acc
+    return (ScanStatus.UPDATE if needs_update else ScanStatus.OK), log_acc, services_to_update
 
 def install_ship():
     """Universal Installer for ship."""
@@ -470,6 +516,11 @@ with the latest versions."""
         help=f"Path where error logs will be saved (default: {os.path.expanduser('~/.ship_errors.log')})"
     )
     group.add_argument(
+        "--set-image-version",
+        type=str,
+        help="Set a specific image version (tag) for a service in the format 'service:tag' (cannot be used with -a or multiple targets)"
+    )
+    group.add_argument(
         "-h", "--help",
         action="help",
         help="Show this help message and exit"
@@ -487,6 +538,15 @@ with the latest versions."""
 
     args = parser.parse_args()
     
+    # Validate arguments
+    if args.delay < 10:
+        print(f"{RED}Error: Delay must be at least 10ms.{NC}")
+        sys.exit(1)
+    
+    if args.jobs < 1:
+        print(f"{RED}Error: Jobs must be at least 1.{NC}")
+        sys.exit(1)
+    
     # Initialize config
     config = Config()
     config.verbose = args.verbose
@@ -496,6 +556,31 @@ with the latest versions."""
     config.prune = args.prune
     config.jobs = args.jobs
     config.set_log_path(args.log_path)
+    
+    # Validate log path is writable
+    try:
+        with open(config.log_path, 'a') as f:
+            pass
+    except (IOError, OSError) as e:
+        print(f"{RED}Error: Cannot write to log path {config.log_path}: {e}{NC}")
+        sys.exit(1)
+    
+    # Validate set-image-version arguments
+    if args.set_image_version:
+        if args.all:
+            print(f"{RED}Error: --set-image-version cannot be used with -a (all).{NC}")
+            sys.exit(1)
+        if len(args.targets) != 1:
+            print(f"{RED}Error: --set-image-version requires exactly one target directory.{NC}")
+            sys.exit(1)
+        try:
+            service, tag = args.set_image_version.split(':', 1)
+            if not service or not tag:
+                raise ValueError
+            config.set_image_version = (service, tag)
+        except ValueError:
+            print(f"{RED}Error: --set-image-version must be in format 'service:tag'.{NC}")
+            sys.exit(1)
     
     # Setup logger
     logger = config.setup_logging()
@@ -510,11 +595,113 @@ with the latest versions."""
     # Validate Docker installation
     check_docker_installed()
     
-    # Check if no arguments were provided
-    if not args.all and not args.targets:
-        print(f"\n{YELLOW}No parameters provided.{NC}")
-        print(f"Use {BOLD}-h{NC} or {BOLD}--help{NC} to see available options.\n")
-        parser.print_help()
+    # Handle set-image-version mode
+    if config.set_image_version:
+        target = args.targets[0]
+        yaml_files = ["docker-compose.yml", "docker-compose.yaml"]
+        yaml_path = next(
+            (os.path.join(target, f) for f in yaml_files if os.path.exists(os.path.join(target, f))),
+            None
+        )
+        
+        if not yaml_path:
+            print(f"{RED}Error: No docker-compose file found in {target}.{NC}")
+            sys.exit(1)
+        
+        service, tag = config.set_image_version
+        
+        try:
+            import yaml
+        except ImportError:
+            print(f"{RED}Error: PyYAML is required for --set-image-version. Install with: pip install PyYAML{NC}")
+            sys.exit(1)
+        
+        try:
+            with open(yaml_path, 'r') as f:
+                compose_data = yaml.safe_load(f)
+        except Exception as e:
+            print(f"{RED}Error: Failed to parse docker-compose file: {e}{NC}")
+            sys.exit(1)
+        
+        if 'services' not in compose_data or service not in compose_data['services']:
+            print(f"{RED}Error: Service '{service}' not found in docker-compose file.{NC}")
+            sys.exit(1)
+        
+        svc = compose_data['services'][service]
+        if 'image' not in svc:
+            print(f"{RED}Error: Service '{service}' does not have an image defined.{NC}")
+            sys.exit(1)
+        
+        current_image = svc['image']
+        # Assume format image:tag, replace tag
+        if ':' in current_image:
+            base_image = current_image.rsplit(':', 1)[0]
+            new_image = f"{base_image}:{tag}"
+        else:
+            new_image = f"{current_image}:{tag}"
+        
+        print(f"Current image for service '{service}': {current_image}")
+        print(f"New image: {new_image}")
+        
+        if not config.yes:
+            confirm = input("Proceed with change? [Y/n] ")
+            if confirm.lower() not in ['', 'y']:
+                sys.exit(0)
+        
+        # Create backup
+        backup_path = f"{yaml_path}.backup"
+        try:
+            import shutil
+            shutil.copy2(yaml_path, backup_path)
+            print(f"Backup created: {backup_path}")
+        except Exception as e:
+            print(f"{RED}Error: Failed to create backup: {e}{NC}")
+            sys.exit(1)
+        
+        # Apply change
+        svc['image'] = new_image
+        try:
+            with open(yaml_path, 'w') as f:
+                yaml.safe_dump(compose_data, f, default_flow_style=False)
+            print(f"{GREEN}Successfully updated image version for service '{service}' to {tag}.{NC}")
+        except Exception as e:
+            print(f"{RED}Error: Failed to write changes: {e}{NC}")
+            sys.exit(1)
+        
+        # Now validate and update if needed
+        print("Validating changes and applying update if necessary...")
+        status, logs, services = check_stack(target, config)
+        if status == ScanStatus.UPDATE:
+            print(f"Update required for modified stack. Processing...")
+            safe_yaml = shlex.quote(yaml_path)
+            
+            # Pull images
+            print("   ├─ Pulling remote images... ", end="", flush=True)
+            pull_out, pull_err, pull_success = run_cmd(f"docker compose -f {safe_yaml} pull")
+            if not pull_success:
+                print(f"{RED}Failed{NC}.")
+                if config.verbose:
+                    print(f"   {GRAY}Error: {pull_err}{NC}")
+                sys.exit(1)
+            print("Done.")
+            
+            # Recreate containers
+            recreate_flag = "--force-recreate" if config.force else ""
+            mode_text = "Force" if config.force else "Standard"
+            print(f"   └─ Recreating ({mode_text})... ", end="", flush=True)
+            up_cmd = f"docker compose -f {safe_yaml} up -d {recreate_flag}".strip()
+            up_out, up_err, up_success = run_cmd(up_cmd)
+            if up_success:
+                print(f"{GREEN}[SUCCESS]{NC}")
+                print(f"{GREEN}Stack updated successfully.{NC}")
+            else:
+                print(f"{RED}[FAILED]{NC}")
+                if config.verbose:
+                    print(f"   {GRAY}Error: {up_err}{NC}")
+                sys.exit(1)
+        else:
+            print("No update required after version change.")
+        
         sys.exit(0)
     
     # Collect target directories
@@ -538,6 +725,7 @@ with the latest versions."""
 
     if not valid_targets:
         print(f"{YELLOW}No valid targets found.{NC}")
+        print(f"Use {BOLD}-h{NC} or {BOLD}--help{NC} to see available options.")
         sys.exit(0)
 
     # Scan directories
@@ -574,7 +762,7 @@ with the latest versions."""
                         target = futures_map.pop(future)
                         
                         try:
-                            status, logs = future.result()
+                            status, logs, services = future.result()
                             print(
                                 f"\r{CLEAR_LINE}{GRAY}[{count}/{len(valid_targets)}]{NC} Checked: {BOLD}{target}{NC}",
                                 end="",
@@ -582,9 +770,9 @@ with the latest versions."""
                             )
                             
                             if status == ScanStatus.UPDATE:
-                                updatable.append(target)
+                                updatable.append({"directory": target, "services": services})
                             
-                            if config.verbose and logs:
+                            if logs:
                                 print(f"\n{CYAN}Analysis:{NC} {BOLD}{target}{NC}{logs}\n")
                         except Exception as e:
                             logger.error(f"Error processing {target}: {e}")
@@ -610,7 +798,8 @@ with the latest versions."""
     # Show stacks to update
     status_label = "Ready to update (Force Mode):" if config.force else "Stacks identified for update:"
     print(f"\n{CYAN}{BOLD}{status_label}{NC}")
-    print(f"{CYAN}{' '.join(updatable)}{NC}")
+    services_list = ' '.join([' '.join(item["services"]) for item in updatable])
+    print(f"{CYAN}{services_list}{NC}")
     print(f"\n{BOLD}Summary: Total of {len(updatable)} stack(s) to process.{NC}")
 
     # Confirm before updating
@@ -622,14 +811,29 @@ with the latest versions."""
 
     # Execute updates with proper locking
     try:
+        # Ensure lock file directory exists
+        lock_dir = os.path.dirname(LOCK_FILE)
+        if lock_dir and not os.path.exists(lock_dir):
+            try:
+                os.makedirs(lock_dir, exist_ok=True)
+            except (IOError, OSError) as e:
+                print(f"{RED}Error: Cannot create lock directory {lock_dir}: {e}{NC}")
+                logger.error(f"Failed to create lock directory: {e}")
+                sys.exit(1)
+        
         with acquire_lock(LOCK_FILE) as f_lock:
-            for i, target in enumerate(updatable, 1):
-                name = os.path.basename(target)
-                print(f"{get_timestamp()} [{i}/{len(updatable)}] {CYAN}➜ PROCESSING STACK:{NC} {BOLD}{name}{NC}")
+            for i, item in enumerate(updatable, 1):
+                target = item["directory"]
+                services = item["services"]
+                services_str = ' '.join(services)
+                print(f"{get_timestamp()} [{i}/{len(updatable)}] {CYAN}➜ PROCESSING STACK:{NC} {BOLD}{services_str}{NC}")
                 
                 yaml = next(
-                    (os.path.join(target, f) for f in ["docker-compose.yml", "docker-compose.yaml"]
-                     if os.path.exists(os.path.join(target, f))),
+                    (
+                        os.path.join(target, f)
+                        for f in ["docker-compose.yml", "docker-compose.yaml"]
+                        if os.path.exists(os.path.join(target, f))
+                    ),
                     None
                 )
                 
@@ -641,15 +845,23 @@ with the latest versions."""
                 safe_yaml = shlex.quote(yaml)
                 
                 try:
+                    # Verify yaml file exists before processing
+                    if not os.path.exists(yaml):
+                        logger.error(f"Docker-compose file disappeared: {yaml}")
+                        print(f"   {RED}└─ ERROR: File no longer exists{NC}")
+                        continue
+                    
                     with open(config.log_path, "a") as log:
                         # Pull images
                         print(f"   {NC}├─ [INFO] Pulling remote images... ", end="", flush=True)
                         pull_cmd = f"docker compose -f {safe_yaml} pull"
-                        _, _, pull_success = run_cmd(pull_cmd)
+                        pull_out, pull_err, pull_success = run_cmd(pull_cmd)
                         
                         if not pull_success:
-                            logger.warning(f"docker compose pull failed for {target}")
+                            logger.warning(f"docker compose pull failed for {target}: {pull_err}")
                             print(f"{RED}Failed{NC}.")
+                            if config.verbose:
+                                print(f"   {GRAY}Error: {pull_err}{NC}")
                             continue
                         
                         print("Done.")
@@ -660,15 +872,17 @@ with the latest versions."""
                         print(f"   {GREEN}└─ [NEW] Recreating ({mode_text})...{NC}", end="", flush=True)
                         
                         up_cmd = f"docker compose -f {safe_yaml} up -d {recreate_flag}".strip()
-                        _, _, up_success = run_cmd(up_cmd)
+                        up_out, up_err, up_success = run_cmd(up_cmd)
                         
                         status_text = f" {GREEN if up_success else RED}[{'SUCCESS' if up_success else 'FAILED'}].{NC}"
                         print(status_text)
                         
                         if up_success:
-                            logger.info(f"Successfully updated stack: {name}")
+                            logger.info(f"Successfully updated stack: {services_str}")
                         else:
-                            logger.error(f"Failed to update stack: {name}")
+                            logger.error(f"Failed to update stack {services_str}: {up_err}")
+                            if config.verbose:
+                                print(f"   {GRAY}Error: {up_err}{NC}")
                 
                 except IOError as e:
                     logger.error(f"Failed to write to log file: {e}")
@@ -697,7 +911,7 @@ with the latest versions."""
     except KeyboardInterrupt:
         print(f"\n{YELLOW}Update process interrupted by user.{NC}")
         logger.info("Update process interrupted by user")
-        sys.exit(0)
+        sys.exit(130)
     except Exception as e:
         logger.error(f"Unexpected error during update: {e}")
         print(f"\n{RED}Unexpected error: {e}{NC}")

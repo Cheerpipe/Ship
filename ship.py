@@ -17,10 +17,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
 # Script: ship (Docker Compose Updater)
-# Version: 5.8.2 (Cleanup Feedback) | Author: Felipe Urzúa
+# Version: 5.8.3 (Cleanup Feedback) | Author: Felipe Urzúa
 # ==============================================================================
 
-VERSION = "5.8.2"
+VERSION = "5.8.3"
 AUTHOR = "Felipe Urzúa"
 SLOGAN = "Don't sink the ship :D"
 LOCK_FILE = os.path.expanduser("~/.ship.pid")

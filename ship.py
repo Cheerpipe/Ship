@@ -101,6 +101,26 @@ def get_timestamp():
         return f"{GRAY}[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]{NC}"
     return ""
 
+def format_hash(hash_str, verbose):
+    """
+    Formats a SHA256 hash or container ID based on verbose setting.
+    If not verbose, returns the last 8 digits with '...' prefix (uppercase).
+    """
+    if not hash_str or not isinstance(hash_str, str) or hash_str in ["N/A", "NOT_FOUND", "RATE_LIMIT_ERROR"]:
+        return hash_str
+    
+    if verbose:
+        return hash_str
+    
+    # Extract only the hex part if there's a prefix like 'sha256:'
+    clean_hash = hash_str.split(':')[-1]
+    
+    # If it's shorter than 8, just return it
+    if len(clean_hash) <= 8:
+        return clean_hash.upper()
+    
+    return f"...{clean_hash[-8:].upper()}"
+
 def display_header():
     """Prints the script header to the terminal."""
     print(f"{CYAN}{BOLD}ship v{VERSION}{NC} | {GRAY}Author: {AUTHOR}{NC}")
@@ -375,10 +395,10 @@ def check_stack(directory, config):
         
         log_acc += f"\n    {BOLD}Service:{NC} {svc_name}"
         log_acc += f"\n    {GRAY}├─ Image:    {NC}{img}"
-        log_acc += f"\n    {GRAY}├─ Remote D: {NC}{YELLOW}{remote_hash or 'N/A'}{NC}"
-        log_acc += f"\n    {GRAY}├─ Local D:  {NC}{CYAN}{local_dig or 'N/A'}{NC}"
-        log_acc += f"\n    {GRAY}├─ Local ID: {NC}{GRAY}{local_id}{NC}"
-        log_acc += f"\n    {GRAY}└─ Run ID:   {NC}{GRAY}{running_img_id}{NC}"
+        log_acc += f"\n    {GRAY}├─ Remote D: {NC}{YELLOW}{format_hash(remote_hash, config.verbose) if remote_hash else 'N/A'}{NC}"
+        log_acc += f"\n    {GRAY}├─ Local D:  {NC}{CYAN}{format_hash(local_dig, config.verbose) if local_dig else 'N/A'}{NC}"
+        log_acc += f"\n    {GRAY}├─ Local ID: {NC}{GRAY}{format_hash(local_id, config.verbose)}{NC}"
+        log_acc += f"\n    {GRAY}└─ Run ID:   {NC}{GRAY}{format_hash(running_img_id, config.verbose)}{NC}"
         log_acc += f"\n    {GRAY}├─ Comparisons:{NC}"
         log_acc += f"\n    {GRAY}│  ├─ Remote Digest == Local Digest: {remote_hash == local_dig if remote_hash and local_dig else 'Cannot compare (missing data)'}{NC}"
         log_acc += f"\n    {GRAY}│  └─ Local Image ID == Running Image ID: {local_id == running_img_id if local_id != 'N/A' and running_img_id != 'NOT_FOUND' else 'Cannot compare (missing data)'}{NC}"
